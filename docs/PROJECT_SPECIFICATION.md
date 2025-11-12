@@ -14,6 +14,7 @@
 ### Session 2025-11-12
 
 - Q: Which base model should be used as the primary model for initial experiments? → A: mental/mental-bert-base-uncased
+- Q: Which pooling strategy should be used to aggregate token representations? → A: last hidden state token (last_hidden_state[:, 0, :])
 
 ---
 
@@ -88,7 +89,7 @@ Input: Tokenized sentence text
   ↓
 Transformer Encoder (AutoModel)
   ↓
-Pooled Output ([CLS] token or mean pooling)
+Pooled Output: [CLS] token from last hidden state (last_hidden_state[:, 0, :])
   ↓
 Classification Head (Linear layer)
   ↓
@@ -96,6 +97,8 @@ Output: Logits for 10 classes
 ```
 
 **Implementation**: `src/Project/SubProject/models/model.py:11-21`
+
+**Pooling Strategy**: Use the [CLS] token representation from the last hidden state (`last_hidden_state[:, 0, :]`) as the sentence-level embedding for classification.
 
 ### 3.2 Model Variants to Explore
 
@@ -335,15 +338,15 @@ use_class_weights: [True, False]
 4. **Framework**: PyTorch + Hugging Face Transformers
 5. **Tracking**: MLflow for experiments, Optuna for HPO
 6. **Primary base model**: mental/mental-bert-base-uncased (clinical mental health domain)
+7. **Pooling strategy**: [CLS] token from last hidden state (last_hidden_state[:, 0, :])
 
 ### 9.2 To Decide
 
-1. **Pooling strategy**: [CLS] token vs mean pooling vs max pooling?
-2. **Sequence length**: 512 tokens sufficient or need 1024?
-3. **Class weighting**: Inverse frequency vs manual tuning?
-4. **Hard negative handling**: Separate class or part of multi-label?
-5. **LoRA usage**: Full fine-tuning vs LoRA vs QLoRA?
-6. **Post-level vs sentence-level**: Aggregate sentence predictions to post?
+1. **Sequence length**: 512 tokens sufficient or need 1024?
+2. **Class weighting**: Inverse frequency vs manual tuning?
+3. **Hard negative handling**: Separate class or part of multi-label?
+4. **LoRA usage**: Full fine-tuning vs LoRA vs QLoRA?
+5. **Post-level vs sentence-level**: Aggregate sentence predictions to post?
 
 ---
 
