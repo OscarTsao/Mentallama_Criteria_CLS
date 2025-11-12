@@ -9,6 +9,14 @@
 
 ---
 
+## Clarifications
+
+### Session 2025-11-12
+
+- Q: Which base model should be used as the primary model for initial experiments? → A: mental/mental-bert-base-uncased
+
+---
+
 ## 1. Problem Statement
 
 Develop an ML system to automatically detect the presence or absence of DSM-5 Major Depressive Disorder symptoms in social media text (Reddit posts). The system should:
@@ -91,14 +99,16 @@ Output: Logits for 10 classes
 
 ### 3.2 Model Variants to Explore
 
-1. **Base Models** (Hugging Face):
-   - `mental/mental-bert-base-uncased` (clinical domain)
-   - `microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext`
-   - `bert-base-uncased` (baseline)
-   - `roberta-base`
-   - `mental/mental-roberta-base`
+1. **Primary Base Model**:
+   - `mental/mental-bert-base-uncased` (clinical mental health domain) - **Selected for initial experiments**
 
-2. **Parameter-Efficient Fine-Tuning**:
+2. **Alternative Base Models** (for comparison/benchmarking):
+   - `microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext` (biomedical literature)
+   - `bert-base-uncased` (general domain baseline)
+   - `roberta-base` (general domain, better architecture)
+   - `mental/mental-roberta-base` (clinical RoBERTa variant)
+
+3. **Parameter-Efficient Fine-Tuning**:
    - LoRA (Low-Rank Adaptation)
    - QLoRA (Quantized LoRA for larger models)
 
@@ -324,6 +334,7 @@ use_class_weights: [True, False]
 3. **Model base**: Transformer encoders (BERT family)
 4. **Framework**: PyTorch + Hugging Face Transformers
 5. **Tracking**: MLflow for experiments, Optuna for HPO
+6. **Primary base model**: mental/mental-bert-base-uncased (clinical mental health domain)
 
 ### 9.2 To Decide
 
@@ -331,9 +342,8 @@ use_class_weights: [True, False]
 2. **Sequence length**: 512 tokens sufficient or need 1024?
 3. **Class weighting**: Inverse frequency vs manual tuning?
 4. **Hard negative handling**: Separate class or part of multi-label?
-5. **Base model selection**: Mental-BERT vs PubMedBERT vs standard BERT?
-6. **LoRA usage**: Full fine-tuning vs LoRA vs QLoRA?
-7. **Post-level vs sentence-level**: Aggregate sentence predictions to post?
+5. **LoRA usage**: Full fine-tuning vs LoRA vs QLoRA?
+6. **Post-level vs sentence-level**: Aggregate sentence predictions to post?
 
 ---
 
