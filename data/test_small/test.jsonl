@@ -1,0 +1,5 @@
+{"post_id": "p011", "criterion_id": "c006", "post": "I'm so tired all the time. No matter how much I sleep, I still feel exhausted and drained.", "criterion": "Fatigue or loss of energy nearly every day", "label": 1}
+{"post_id": "p012", "criterion_id": "c007", "post": "I feel worthless and guilty about everything. I blame myself for things that aren't even my fault.", "criterion": "Feelings of worthlessness or excessive or inappropriate guilt", "label": 1}
+{"post_id": "p013", "criterion_id": "c008", "post": "I can't concentrate on anything. I can't make simple decisions, and my mind feels foggy.", "criterion": "Diminished ability to think or concentrate, or indecisiveness", "label": 1}
+{"post_id": "p014", "criterion_id": "c006", "post": "I have so much energy today! I went for a run, cleaned the house, and still have energy left.", "criterion": "Fatigue or loss of energy nearly every day", "label": 0}
+{"post_id": "p015", "criterion_id": "c007", "post": "I'm proud of what I've accomplished. I know I'm doing my best and that's enough.", "criterion": "Feelings of worthlessness or excessive or inappropriate guilt", "label": 0}

@@ -40,7 +40,7 @@
 - [ ] T505 [US3] Update quickstart/README with inference instructions, latency expectations, and how to interpret MLflow latency metrics.
 
 ## Phase 6: Polish & Cross-Cutting
-- [ ] T601 [POL] Document Hydra overrides, MLflow workflow, and troubleshooting in `docs/` (link quickstart, add FAQ for OOM + sqlite locks).
-- [ ] T602 [POL] Add lint/test automation (Makefile shortcut or GitHub Action) running ruff, black, pytest.
-- [ ] T603 [POL] Validate quickstart commands end-to-end on reduced dataset; capture MLflow screenshots or logs for future reference.
-- [ ] T604 [POL] Register best checkpoint in MLflow Model Registry (`mentallama-criteria-cls`) and record version in README + release notes.
+- [x] T601 [POL] Document Hydra overrides, MLflow workflow, and troubleshooting in `docs/` (link quickstart, add FAQ for OOM + sqlite locks).
+- [x] T602 [POL] Add lint/test automation (Makefile shortcut or GitHub Action) running ruff, black, pytest.
+- [x] T603 [POL] Validate quickstart commands end-to-end on reduced dataset; capture MLflow screenshots or logs for future reference.
+- [x] T604 [POL] Register best checkpoint in MLflow Model Registry (`mentallama-criteria-cls`) and record version in README + release notes.
