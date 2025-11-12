@@ -16,6 +16,7 @@
 - Q: Which base model should be used as the primary model for initial experiments? → A: mental/mental-bert-base-uncased
 - Q: Which pooling strategy should be used to aggregate token representations? → A: last hidden state token (last_hidden_state[:, 0, :])
 - Q: Which class weighting strategy should be used to handle class imbalance? → A: Inverse frequency weighting (pos_weight = neg_count / pos_count per class)
+- Q: Which parameter-efficient fine-tuning strategy should be used? → A: LoRA with r=8, alpha=16
 
 ---
 
@@ -113,8 +114,10 @@ Output: Logits for 10 classes
    - `mental/mental-roberta-base` (clinical RoBERTa variant)
 
 3. **Parameter-Efficient Fine-Tuning**:
-   - LoRA (Low-Rank Adaptation)
-   - QLoRA (Quantized LoRA for larger models)
+   - **LoRA (Low-Rank Adaptation)** - **Selected strategy**
+     - Configuration: r=8, alpha=16, dropout=0.1
+     - Target modules: query, key, value projection layers
+     - Reduces trainable parameters by ~99% while maintaining performance
 
 ### 3.3 Classification Head Options
 
@@ -156,6 +159,13 @@ loss = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 - Gradient checkpointing (saves ~30% VRAM)
 - Gradient accumulation steps: 2-4
 - Max sequence length: 512 tokens
+
+**LoRA Configuration**:
+- Rank (r): 8
+- Alpha: 16
+- Dropout: 0.1
+- Target modules: ["query", "key", "value"] (attention projection layers)
+- Trainable parameters: ~1% of total model parameters
 
 **Attention Implementation**:
 - SDPA (Scaled Dot-Product Attention) with Flash backend
@@ -305,18 +315,17 @@ use_class_weights: [True, False]
 
 ### Phase 2: Model & Training ✅ To Implement
 - [x] Basic model architecture (done in `model.py`)
-- [ ] Multi-label loss implementation
+- [ ] LoRA integration (r=8, alpha=16, target: q/k/v projections)
+- [ ] Multi-label loss with inverse frequency weighting
 - [ ] Training loop (`train_engine.py`)
 - [ ] Evaluation loop (`eval_engine.py`)
 - [ ] Gradient checkpointing
-- [ ] Mixed precision training
+- [ ] Mixed precision training (bf16)
 
 ### Phase 3: Optimization
 - [ ] MLflow experiment tracking
 - [ ] Optuna hyperparameter tuning
-- [ ] Class weighting for imbalance
 - [ ] Hard negative mining
-- [ ] LoRA/QLoRA integration
 
 ### Phase 4: Evaluation & Analysis
 - [ ] Per-symptom metrics
@@ -346,13 +355,13 @@ use_class_weights: [True, False]
 6. **Primary base model**: mental/mental-bert-base-uncased (clinical mental health domain)
 7. **Pooling strategy**: [CLS] token from last hidden state (last_hidden_state[:, 0, :])
 8. **Class weighting**: Inverse frequency weighting (pos_weight = neg_count / pos_count per class)
+9. **Fine-tuning strategy**: LoRA with r=8, alpha=16, dropout=0.1
 
 ### 9.2 To Decide
 
 1. **Sequence length**: 512 tokens sufficient or need 1024?
 2. **Hard negative handling**: Separate class or part of multi-label?
-3. **LoRA usage**: Full fine-tuning vs LoRA vs QLoRA?
-4. **Post-level vs sentence-level**: Aggregate sentence predictions to post?
+3. **Post-level vs sentence-level**: Aggregate sentence predictions to post?
 
 ---
 
