@@ -64,7 +64,7 @@ The codebase follows a nested package structure: `Project.SubProject.*`
 ### Data Structure
 
 **Mental Health Classification Data**:
-- `data/DSM5/MDD_Criteira.json`: DSM-5 Major Depressive Disorder diagnostic criteria (A.1-A.9)
+- `data/DSM5/MDD_Criteria.json`: DSM-5 Major Depressive Disorder diagnostic criteria (A.1-A.9)
 - `data/redsm5/`: Social media posts with ground truth labels linking posts to criteria
 
 **Expected Data Format**:
