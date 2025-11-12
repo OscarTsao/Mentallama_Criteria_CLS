@@ -15,6 +15,7 @@
 
 - Q: Which base model should be used as the primary model for initial experiments? → A: mental/mental-bert-base-uncased
 - Q: Which pooling strategy should be used to aggregate token representations? → A: last hidden state token (last_hidden_state[:, 0, :])
+- Q: Which class weighting strategy should be used to handle class imbalance? → A: Inverse frequency weighting (pos_weight = neg_count / pos_count per class)
 
 ---
 
@@ -127,12 +128,17 @@ Output: Logits for 10 classes
 
 ### 4.1 Loss Function
 
-**Multi-label Binary Cross Entropy**:
+**Multi-label Binary Cross Entropy with Inverse Frequency Weighting**:
 ```python
-loss = torch.nn.BCEWithLogitsLoss()
-# or with class weights for imbalance:
-loss = torch.nn.BCEWithLogitsLoss(pos_weight=class_weights)
+# Calculate inverse frequency weights per class
+# pos_weight[i] = (total_samples - positive_count[i]) / positive_count[i]
+pos_weight = torch.tensor([
+    (n_samples - n_pos[i]) / n_pos[i] for i in range(num_classes)
+])
+loss = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 ```
+
+**Rationale**: Inverse frequency weighting automatically adjusts for severe class imbalance (e.g., PSYCHOMOTOR: 35 examples vs WORTHLESSNESS: 311 examples), helping the model learn from rare symptoms without manual tuning.
 
 ### 4.2 Optimization Strategy
 
@@ -172,8 +178,8 @@ max_grad_norm = 1.0
 
 - **Sequence packing**: Pack multiple short sentences into 512-token sequences
 - **Length bucketing**: Group similar-length samples to reduce padding
-- **Oversampling**: Upsample rare symptoms (PSYCHOMOTOR, APPETITE_CHANGE)
-- **Hard negative mining**: Include explicit negatives in training
+- **Class imbalance**: Handled via inverse frequency weighting in loss function (no oversampling needed)
+- **Hard negative mining**: Include explicit negatives in training (392 posts with no symptoms)
 
 ---
 
@@ -339,14 +345,14 @@ use_class_weights: [True, False]
 5. **Tracking**: MLflow for experiments, Optuna for HPO
 6. **Primary base model**: mental/mental-bert-base-uncased (clinical mental health domain)
 7. **Pooling strategy**: [CLS] token from last hidden state (last_hidden_state[:, 0, :])
+8. **Class weighting**: Inverse frequency weighting (pos_weight = neg_count / pos_count per class)
 
 ### 9.2 To Decide
 
 1. **Sequence length**: 512 tokens sufficient or need 1024?
-2. **Class weighting**: Inverse frequency vs manual tuning?
-3. **Hard negative handling**: Separate class or part of multi-label?
-4. **LoRA usage**: Full fine-tuning vs LoRA vs QLoRA?
-5. **Post-level vs sentence-level**: Aggregate sentence predictions to post?
+2. **Hard negative handling**: Separate class or part of multi-label?
+3. **LoRA usage**: Full fine-tuning vs LoRA vs QLoRA?
+4. **Post-level vs sentence-level**: Aggregate sentence predictions to post?
 
 ---
 
