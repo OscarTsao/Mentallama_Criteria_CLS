@@ -43,7 +43,8 @@
 - [ ] Logs contain fold index, loss curves, LR schedule, GPU mem (nvidia-smi), deterministic flags noted.
 
 ## 7. Documentation & Release
-- [ ] `research.md` updated with dataset stats, prompt experiments, DoRA VRAM notes, retry policy reference.
-- [ ] `quickstart.md` verified end-to-end; troubleshooting section includes OOM, MLflow locks, latency guidance.
-- [ ] README references CLI contract, dataset stats, latency KPI.
-- [ ] Best checkpoint registered in MLflow Model Registry (`mentallama-criteria-cls`) with signature + example IO.
+- [x] `research.md` updated with dataset stats, prompt experiments, DoRA VRAM notes, retry policy reference.
+- [x] `quickstart.md` verified end-to-end; troubleshooting section includes OOM, MLflow locks, latency guidance.
+- [x] README references CLI contract, dataset stats, latency KPI.
+- [x] Best checkpoint registered in MLflow Model Registry (`mentallama-criteria-cls`) with signature + example IO.
+- [x] **Phase 6 Complete**: Makefile, CI pipeline, user guide, validation script, model registry script, test data, and release notes all delivered.

@@ -1,9 +1,8 @@
 import os
 import random
-from typing import Optional
 
 
-def set_seed(seed: int = 42, deterministic: bool = True, env_var: Optional[str] = None) -> int:
+def set_seed(seed: int = 42, deterministic: bool = True, env_var: str | None = None) -> int:
     """Set RNG seeds for Python, NumPy, and PyTorch (if available).
 
     - If `env_var` is provided and set, it overrides the `seed`.
@@ -17,14 +16,14 @@ def set_seed(seed: int = 42, deterministic: bool = True, env_var: Optional[str] 
             pass
 
     try:
-        import numpy as np  # type: ignore
+        import numpy as np
     except Exception:  # pragma: no cover - optional dependency
-        np = None  # type: ignore
+        np = None
 
     try:
-        import torch  # type: ignore
+        import torch
     except Exception:  # pragma: no cover - optional dependency
-        torch = None  # type: ignore
+        torch = None
 
     random.seed(seed)
     if np is not None:
@@ -44,4 +43,3 @@ def set_seed(seed: int = 42, deterministic: bool = True, env_var: Optional[str] 
                 pass
 
     return seed
-
