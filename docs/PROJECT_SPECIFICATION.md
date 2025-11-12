@@ -3,9 +3,9 @@
 ## Overview
 
 **Project Name**: Mentallama_Criteria_CLS
-**Purpose**: Multi-label text classification for DSM-5 Major Depressive Disorder (MDD) criteria detection
+**Purpose**: Binary classification for DSM-5 Major Depressive Disorder (MDD) criteria detection
 **Dataset**: ReDSM5 - Reddit posts annotated for depression symptoms
-**Task Type**: Sentence-level clinical NLP with explainability
+**Task Type**: Post-level (post, criterion) pair classification with explainability
 
 ---
 
@@ -17,17 +17,19 @@
 - Q: Which pooling strategy should be used to aggregate token representations? → A: last hidden state token (last_hidden_state[:, 0, :])
 - Q: Which class weighting strategy should be used to handle class imbalance? → A: Inverse frequency weighting (pos_weight = neg_count / pos_count per class)
 - Q: Which parameter-efficient fine-tuning strategy should be used? → A: LoRA with r=8, alpha=16
+- Q: What is the prediction granularity and input format? → A: Post-level predictions with input format (post, criterion); groundtruth in status column
 
 ---
 
 ## 1. Problem Statement
 
-Develop an ML system to automatically detect the presence or absence of DSM-5 Major Depressive Disorder symptoms in social media text (Reddit posts). The system should:
+Develop an ML system to automatically detect the presence or absence of DSM-5 Major Depressive Disorder criteria in social media text (Reddit posts). The system should:
 
-- Classify text at the sentence level for 9 DSM-5 symptoms + 1 special case
+- Classify (post, criterion) pairs at the post level for 9 DSM-5 criteria + 1 special case
+- Input format: (post_text, criterion_description)
+- Output: Binary prediction (status: 1 = criterion present, 0 = criterion absent)
 - Provide explainable predictions with clinical rationale
 - Handle class imbalance and hard negative examples
-- Support multi-label classification (posts can have 0-9 symptoms)
 
 ---
 
@@ -42,13 +44,16 @@ Develop an ML system to automatically detect the presence or absence of DSM-5 Ma
 
 **Files**:
 - `redsm5_posts.csv`: Contains `post_id` and full post `text`
-- `redsm5_annotations.csv`: Contains sentence-level annotations with columns:
+- `data/DSM5/MDD_Criteira.json`: Contains criterion definitions with `criterion_id` and `criterion` text
+- `groundtruth.csv`: Contains post-level annotations with columns:
   - `post_id`: Unique post identifier
-  - `sentence_id`: Unique sentence identifier
-  - `sentence_text`: The annotated sentence
-  - `DSM5_symptom`: The symptom category (see 2.2)
-  - `status`: 1 (present) or 0 (absent)
-  - `explanation`: Clinical rationale from psychologist
+  - `criterion_id`: DSM-5 criterion identifier (A.1 through A.9 + SPECIAL_CASE)
+  - `status`: Binary label (1 = criterion present in post, 0 = criterion absent)
+
+**Input Format**: Each training sample is a (post, criterion) pair:
+- `post`: Full Reddit post text
+- `criterion`: DSM-5 criterion description text
+- `label`: Binary status (0 or 1)
 
 ### 2.2 Target Labels (10 Classes)
 
@@ -87,7 +92,8 @@ Based on DSM-5 criteria for Major Depressive Episode (Criterion A):
 ### 3.1 Core Components
 
 ```
-Input: Tokenized sentence text
+Input: Tokenized (post, criterion) pair
+  Format: [CLS] post_text [SEP] criterion_text [SEP]
   ↓
 Transformer Encoder (AutoModel)
   ↓
@@ -95,12 +101,13 @@ Pooled Output: [CLS] token from last hidden state (last_hidden_state[:, 0, :])
   ↓
 Classification Head (Linear layer)
   ↓
-Output: Logits for 10 classes
+Output: Binary logit (criterion present/absent)
 ```
 
 **Implementation**: `src/Project/SubProject/models/model.py:11-21`
 
-**Pooling Strategy**: Use the [CLS] token representation from the last hidden state (`last_hidden_state[:, 0, :]`) as the sentence-level embedding for classification.
+**Input Format**: Concatenate post and criterion with special tokens for pair classification
+**Pooling Strategy**: Use the [CLS] token representation from the last hidden state (`last_hidden_state[:, 0, :]`) as the pair-level embedding for binary classification.
 
 ### 3.2 Model Variants to Explore
 
@@ -119,11 +126,11 @@ Output: Logits for 10 classes
      - Target modules: query, key, value projection layers
      - Reduces trainable parameters by ~99% while maintaining performance
 
-### 3.3 Classification Head Options
+### 3.3 Classification Head
 
-- **Single linear layer** (current): `Linear(hidden_dim, 10)`
-- **Multi-layer MLP**: Linear → ReLU → Dropout → Linear
-- **Separate heads per symptom**: 10 binary classifiers
+- **Binary classification head**: `Linear(hidden_dim, 1)` with sigmoid activation
+- Output: Single logit indicating criterion presence probability
+- Training: Binary Cross Entropy Loss with inverse frequency weighting
 
 ---
 
@@ -131,17 +138,17 @@ Output: Logits for 10 classes
 
 ### 4.1 Loss Function
 
-**Multi-label Binary Cross Entropy with Inverse Frequency Weighting**:
+**Binary Cross Entropy with Inverse Frequency Weighting**:
 ```python
-# Calculate inverse frequency weights per class
-# pos_weight[i] = (total_samples - positive_count[i]) / positive_count[i]
-pos_weight = torch.tensor([
-    (n_samples - n_pos[i]) / n_pos[i] for i in range(num_classes)
-])
+# Calculate inverse frequency weight for positive class
+# pos_weight = (n_negative_samples) / (n_positive_samples)
+n_pos = (labels == 1).sum()
+n_neg = (labels == 0).sum()
+pos_weight = torch.tensor([n_neg / n_pos])
 loss = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 ```
 
-**Rationale**: Inverse frequency weighting automatically adjusts for severe class imbalance (e.g., PSYCHOMOTOR: 35 examples vs WORTHLESSNESS: 311 examples), helping the model learn from rare symptoms without manual tuning.
+**Rationale**: Inverse frequency weighting automatically adjusts for class imbalance in (post, criterion) pairs (e.g., rare criteria like PSYCHOMOTOR: 35 positive examples vs common criteria like WORTHLESSNESS: 311 positive examples). When treating each (post, criterion) as a separate sample, this helps the model learn from underrepresented criteria.
 
 ### 4.2 Optimization Strategy
 
@@ -186,43 +193,53 @@ max_grad_norm = 1.0
 
 ### 4.4 Data Handling
 
-- **Sequence packing**: Pack multiple short sentences into 512-token sequences
-- **Length bucketing**: Group similar-length samples to reduce padding
-- **Class imbalance**: Handled via inverse frequency weighting in loss function (no oversampling needed)
-- **Hard negative mining**: Include explicit negatives in training (392 posts with no symptoms)
+- **Input tokenization**: Tokenize (post, criterion) pairs as `[CLS] post [SEP] criterion [SEP]`
+- **Max sequence length**: 512 tokens (truncate long posts if needed)
+- **Padding**: Pad to max_length for batch processing
+- **Class imbalance**: Handled via inverse frequency weighting in loss function
+- **Hard negatives**: Include (post, criterion) pairs with status=0 (criterion absent)
+- **Data augmentation**: Each post paired with all 10 criteria creates multiple training samples
 
 ---
 
 ## 5. Evaluation Metrics
 
-### 5.1 Per-Symptom Metrics
+### 5.1 Binary Classification Metrics (Overall)
 
-For each of 10 classes:
-- Precision
-- Recall
-- F1-score
-- Support (number of true positives)
+For all (post, criterion) pairs:
+- **Accuracy**: Fraction of correct predictions
+- **Precision**: True positives / (True positives + False positives)
+- **Recall**: True positives / (True positives + False negatives)
+- **F1-score**: Harmonic mean of precision and recall
+- **ROC-AUC**: Area under ROC curve
+- **PR-AUC**: Area under Precision-Recall curve
 
-### 5.2 Aggregate Metrics
+### 5.2 Per-Criterion Metrics
 
-- **Macro F1**: Average F1 across all classes (equal weight)
-- **Micro F1**: Global F1 across all predictions
-- **Weighted F1**: F1 weighted by class support
-- **Hamming Loss**: Fraction of incorrect labels
-- **Exact Match Ratio**: Percentage of exactly correct predictions
+For each of 10 criteria (group by criterion_id):
+- Criterion-specific Precision, Recall, F1-score
+- Support (number of positive examples for that criterion)
+- Helps identify which criteria are harder to detect
 
-### 5.3 Clinical Metrics
+### 5.3 Aggregate Metrics
 
-- **Per-symptom confusion matrices**
-- **False positive rate** (critical for clinical safety)
-- **False negative rate** (missing symptoms)
-- **Hard negative accuracy**: Performance on posts with no symptoms
+- **Macro F1**: Average F1 across all 10 criteria (equal weight)
+- **Micro F1**: Global F1 across all (post, criterion) pairs
+- **Weighted F1**: F1 weighted by criterion support
 
-### 5.4 Validation Strategy
+### 5.4 Clinical Metrics
 
-- **K-fold cross-validation** (5-fold recommended)
-- **Stratified split** by symptom presence
-- **Hold-out test set**: 15-20% of data
+- **Per-criterion confusion matrices**: Identify false positives/negatives per criterion
+- **False positive rate**: Critical for clinical safety (avoid false alarms)
+- **False negative rate**: Critical for SUICIDAL_THOUGHTS (must not miss)
+- **Hard negative accuracy**: Performance on (post, criterion) pairs where status=0
+
+### 5.5 Validation Strategy
+
+- **5-fold cross-validation** with stratified splits
+- **Stratification**: By criterion_id and status to ensure balanced representation
+- **Grouping**: Keep all (post, criterion) pairs for same post_id in same fold
+- **Hold-out test set**: 15-20% of posts (all their criteria pairs)
 - **Validation set**: 10-15% for hyperparameter tuning
 
 ---
@@ -347,21 +364,23 @@ use_class_weights: [True, False]
 
 ### 9.1 Resolved
 
-1. **Task type**: Multi-label classification (not multi-class)
-2. **Granularity**: Sentence-level (as per ReDSM5 annotations)
-3. **Model base**: Transformer encoders (BERT family)
-4. **Framework**: PyTorch + Hugging Face Transformers
-5. **Tracking**: MLflow for experiments, Optuna for HPO
-6. **Primary base model**: mental/mental-bert-base-uncased (clinical mental health domain)
-7. **Pooling strategy**: [CLS] token from last hidden state (last_hidden_state[:, 0, :])
-8. **Class weighting**: Inverse frequency weighting (pos_weight = neg_count / pos_count per class)
-9. **Fine-tuning strategy**: LoRA with r=8, alpha=16, dropout=0.1
+1. **Task type**: Binary classification for (post, criterion) pairs
+2. **Granularity**: Post-level with (post, criterion) as input; output is status (0/1)
+3. **Input format**: [CLS] post_text [SEP] criterion_text [SEP]
+4. **Model base**: Transformer encoders (BERT family)
+5. **Framework**: PyTorch + Hugging Face Transformers
+6. **Tracking**: MLflow for experiments, Optuna for HPO
+7. **Primary base model**: mental/mental-bert-base-uncased (clinical mental health domain)
+8. **Pooling strategy**: [CLS] token from last hidden state (last_hidden_state[:, 0, :])
+9. **Class weighting**: Inverse frequency weighting (pos_weight = neg_count / pos_count)
+10. **Fine-tuning strategy**: LoRA with r=8, alpha=16, dropout=0.1
+11. **Output**: Single binary logit per (post, criterion) pair
 
 ### 9.2 To Decide
 
-1. **Sequence length**: 512 tokens sufficient or need 1024?
-2. **Hard negative handling**: Separate class or part of multi-label?
-3. **Post-level vs sentence-level**: Aggregate sentence predictions to post?
+1. **Sequence length**: 512 tokens sufficient or need 1024 for long posts?
+2. **Truncation strategy**: Head-only, tail-only, or head+tail for posts exceeding 512 tokens?
+3. **Threshold tuning**: Use 0.5 or tune threshold on validation set for optimal F1?
 
 ---
 
