@@ -1,64 +1,50 @@
-<!--
-Sync Impact Report
-- Version change: none → 1.0.0
-- Modified principles: n/a (initial adoption)
-- Added sections: Core Principles; Security & Data Management; Development Workflow & Quality Gates
-- Templates requiring updates:
-  ✅ .specify/templates/plan-template.md (aligned, no changes required)
-  ✅ .specify/templates/spec-template.md (aligned, no changes required)
-  ✅ .specify/templates/tasks-template.md (aligned, no changes required)
-- Follow-up TODOs: none
--->
-
-# Mentallama Criteria CLS Constitution
+# [PROJECT_NAME] Constitution
+<!-- Example: Spec Constitution, TaskFlow Constitution, etc. -->
 
 ## Core Principles
 
-### I. Model Architecture & Task (NON-NEGOTIABLE)
-The system uses a Hugging Face Transformer encoder with a lightweight classification head to
-perform binary classification: matched vs. unmatched. Inputs are a criterion description and a
-post; the encoder produces a hidden representation (CLS/pooler), which feeds a linear classifier
-to produce logits for {matched, unmatched}. All modeling code resides under
-`src/Project/SubProject/models/`.
+### [PRINCIPLE_1_NAME]
+<!-- Example: I. Library-First -->
+[PRINCIPLE_1_DESCRIPTION]
+<!-- Example: Every feature starts as a standalone library; Libraries must be self-contained, independently testable, documented; Clear purpose required - no organizational-only libraries -->
 
-### II. Configuration via Hydra (NON-NEGOTIABLE)
-All runtime parameters (model name, tokenizer, training hyperparameters, data paths, seeds,
-MLflow settings) are managed with Hydra. Default YAMLs live in `configs/` with hierarchical
-composition. Runs MUST be reproducible via a single CLI invocation with explicit overrides; the
-resolved config MUST be logged with each run.
+### [PRINCIPLE_2_NAME]
+<!-- Example: II. CLI Interface -->
+[PRINCIPLE_2_DESCRIPTION]
+<!-- Example: Every library exposes functionality via CLI; Text in/out protocol: stdin/args → stdout, errors → stderr; Support JSON + human-readable formats -->
 
-### III. Experiment Tracking with MLflow (NON-NEGOTIABLE)
-MLflow is the system of record for experiments and model registration. The tracking backend uses
-SQLite at `sqlite:///mlflow.db`; the artifact store is the local directory `mlruns/`. Every run MUST
-log parameters, metrics, artifacts, and the resolved Hydra config. Prefer the utilities in
-`src/Project/SubProject/utils/mlflow_utils.py` and enable autologging where applicable.
+### [PRINCIPLE_3_NAME]
+<!-- Example: III. Test-First (NON-NEGOTIABLE) -->
+[PRINCIPLE_3_DESCRIPTION]
+<!-- Example: TDD mandatory: Tests written → User approved → Tests fail → Then implement; Red-Green-Refactor cycle strictly enforced -->
 
-### IV. Testing & Code Quality
-Use pytest for tests, Ruff for linting, Black for formatting (line length 100), and type hints where
-feasible. Add unit tests for utilities and model shapes (e.g., classifier output dims). Determinism
-tests SHOULD seed via `utils.set_seed`. CI MUST fail on lints/formatting/test failures.
+### [PRINCIPLE_4_NAME]
+<!-- Example: IV. Integration Testing -->
+[PRINCIPLE_4_DESCRIPTION]
+<!-- Example: Focus areas requiring integration tests: New library contract tests, Contract changes, Inter-service communication, Shared schemas -->
 
-### V. Reproducibility, Logging, and Observability
-All experiments MUST set seeds, log environment/package versions, and emit structured logs via
-`utils.get_logger`. Key training/eval metrics MUST be logged to MLflow. Randomness controls and
-hardware‑specific flags SHOULD be set to favor reproducible results when practical.
+### [PRINCIPLE_5_NAME]
+<!-- Example: V. Observability, VI. Versioning & Breaking Changes, VII. Simplicity -->
+[PRINCIPLE_5_DESCRIPTION]
+<!-- Example: Text I/O ensures debuggability; Structured logging required; Or: MAJOR.MINOR.BUILD format; Or: Start simple, YAGNI principles -->
 
-## Security & Data Management
-Do not commit secrets or large datasets. Store data under `data/`; write outputs to `outputs/` or
-`artifacts/`. Respect data access controls; strip PII unless explicitly approved. The local
-`mlflow.db` is for development; multi‑user or production requires a managed MLflow server with
-network storage. Use environment variables for sensitive config and allow Hydra to read them.
+## [SECTION_2_NAME]
+<!-- Example: Additional Constraints, Security Requirements, Performance Standards, etc. -->
 
-## Development Workflow & Quality Gates
-Preferred flow: `/speckit.specify` → `/speckit.clarify` → `/speckit.plan` → `/speckit.tasks` →
-`/speckit.analyze` → implementation. Source lives under `src/`, tests under `tests/`. Pull requests
-MUST include passing tests (where applicable), lint/format clean, and updated docs when behavior
-changes. MLflow runs MUST be reproducible from the PR description with a copy‑pasteable command.
+[SECTION_2_CONTENT]
+<!-- Example: Technology stack requirements, compliance standards, deployment policies, etc. -->
+
+## [SECTION_3_NAME]
+<!-- Example: Development Workflow, Review Process, Quality Gates, etc. -->
+
+[SECTION_3_CONTENT]
+<!-- Example: Code review requirements, testing gates, deployment approval process, etc. -->
 
 ## Governance
-This constitution supersedes ad‑hoc practices. Amendments require a PR, a rationale, and a version
-bump (SemVer). Reviews MUST verify compliance with non‑negotiable principles (Hydra config,
-MLflow tracking/registry, binary classifier framing). Violations require explicit justification in a
-Complexity Tracking table (see plan template) and SHOULD be temporary.
+<!-- Example: Constitution supersedes all other practices; Amendments require documentation, approval, migration plan -->
 
-**Version**: 1.0.0 | **Ratified**: 2025-11-12 | **Last Amended**: 2025-11-12
+[GOVERNANCE_RULES]
+<!-- Example: All PRs/reviews must verify compliance; Complexity must be justified; Use [GUIDANCE_FILE] for runtime development guidance -->
+
+**Version**: [CONSTITUTION_VERSION] | **Ratified**: [RATIFICATION_DATE] | **Last Amended**: [LAST_AMENDED_DATE]
+<!-- Example: Version: 2.1.1 | Ratified: 2025-06-13 | Last Amended: 2025-07-16 -->
