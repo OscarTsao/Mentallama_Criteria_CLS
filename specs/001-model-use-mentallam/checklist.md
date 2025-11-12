@@ -17,7 +17,7 @@
 - [ ] Model loads `klyang/MentaLLaMA-chat-7B` via `LlamaForSequenceClassification` with DoRA (r=8, alpha=16, dropout=0.05) + gradient checkpointing.
 - [ ] Prompt builder uses template `post: {post}, criterion: {criterion} Does the post match the criterion description? Output yes or no` with max_len=512, truncation=`longest_first`.
 - [ ] Hydra configs expose tunables for model/training/cv/logging/inference; resolved config saved per run.
-- [ ] Retry/backoff utility wired for Hugging Face + MLflow (base 250 ms, cap 8 s, max attempts 6, jitter, retry on 408/409/429/5xx/timeouts only).
+- [ ] Retry/backoff utility wired for Hugging Face + MLflow (base 250 ms, cap 8 s, max attempts 3, jitter, retry on 408/409/429/5xx/timeouts only).
 
 ## 3. Training Loop (US1)
 - [ ] Training CLI accepts Hydra overrides (`cv.folds`, `training.*`, etc.) and seeds via `utils.set_seed`.
