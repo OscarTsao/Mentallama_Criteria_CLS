@@ -234,15 +234,20 @@ class MentalHealthNLIDataset(Dataset):
         hypothesis = str(row[self.hypothesis_col])
         label = int(row[self.label_col])
 
-        # Tokenize premise and hypothesis as a pair
-        # This automatically adds [CLS] premise [SEP] hypothesis [SEP]
-        # (or equivalent for LLaMA tokenizer)
+        # CRITICAL: Use paper-specified input format template
+        # From CLAUDE.md: "post: {post}, criterion: {criterion} Does the post match the criterion description? Output yes or no"
+        # This is the EXACT format required by the spec for MentalLLaMA NLI
+        formatted_input = (
+            f"post: {premise}, criterion: {hypothesis} "
+            f"Does the post match the criterion description? Output yes or no"
+        )
+
+        # Tokenize the formatted input as a single sequence
         encoding = self.tokenizer(
-            premise,
-            hypothesis,
+            formatted_input,
             max_length=self.max_length,
             padding='max_length',
-            truncation='longest_first',  # Truncate longest of (premise, hypothesis)
+            truncation=True,
             return_tensors='pt',
         )
 

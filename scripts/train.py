@@ -95,14 +95,14 @@ def parse_args():
     parser.add_argument(
         '--epochs',
         type=int,
-        default=10,
-        help='Number of training epochs'
+        default=100,
+        help='Number of training epochs (paper: up to 100)'
     )
     parser.add_argument(
         '--patience',
         type=int,
-        default=3,
-        help='Early stopping patience'
+        default=20,
+        help='Early stopping patience (paper: 20 epochs)'
     )
     parser.add_argument(
         '--save-path',

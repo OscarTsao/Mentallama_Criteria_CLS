@@ -165,9 +165,28 @@ The pipeline converts ReDSM5 annotations to NLI format:
 {
   "premise": "I can't sleep at night anymore",
   "hypothesis": "Insomnia or hypersomnia nearly every day",
-  "label": 1
+  "label": 1,
+  "post_id": "abc123",
+  "sentence_id": 5,
+  "symptom": "SLEEP_ISSUES"
 }
 ```
+
+### Input Format Template
+
+**CRITICAL**: The model uses a specific input format template (from spec):
+
+```
+post: {premise}, criterion: {hypothesis} Does the post match the criterion description? Output yes or no
+```
+
+**Example**:
+```
+Input: "post: I can't sleep at night anymore, criterion: Insomnia or hypersomnia nearly every day Does the post match the criterion description? Output yes or no"
+Label: 1 (entailment)
+```
+
+This template is automatically applied by `MentalHealthNLIDataset` during tokenization.
 
 ### DSM-5 Criteria
 
@@ -196,7 +215,39 @@ The pipeline converts ReDSM5 annotations to NLI format:
 
 ## 🎓 Training
 
-### Full Training Script
+### Training Workflows
+
+The repository provides two training workflows:
+
+1. **Simple Training** (`scripts/train.py`): Single train/val split for quick experiments
+2. **5-Fold Cross-Validation** (`scripts/train_5fold_cv.py`): Paper-compliant CV with StratifiedGroupKFold
+
+**Recommended**: Use 5-fold CV for final results to match paper specification.
+
+### Quick Start (Simple Training)
+
+```bash
+# Basic training with default paper-aligned hyperparameters
+python scripts/train.py --batch-size 8 --epochs 100 --patience 20
+```
+
+### 5-Fold Cross-Validation (Paper-Compliant)
+
+```bash
+# Train all 5 folds (recommended for final results)
+python scripts/train_5fold_cv.py --batch-size 8 --epochs 100 --patience 20
+
+# Train single fold (for testing)
+python scripts/train_5fold_cv.py --fold 0 --batch-size 8 --epochs 100
+```
+
+**Key Features**:
+- ✅ **StratifiedGroupKFold**: Grouped by `post_id` (prevents data leakage)
+- ✅ **Stratified**: Maintains class balance across folds
+- ✅ **Per-fold results**: Saved to `cv_results/fold_N/`
+- ✅ **Aggregated metrics**: Mean ± std F1 and accuracy
+
+### Full Training Script (Programmatic)
 
 ```python
 from src.Project.SubProject.models.model import load_mentallama_for_nli
@@ -242,9 +293,9 @@ trainer = ClassificationTrainer(
     train_loader=train_loader,
     val_loader=val_loader,
     lr=2e-5,
-    num_epochs=10,
+    num_epochs=100,
     gradient_accumulation_steps=4,
-    early_stopping_patience=3,
+    early_stopping_patience=20,
     save_path='best_model.pt'
 )
 
@@ -256,25 +307,30 @@ print(f"Best validation F1: {trainer.best_val_f1:.4f}")
 
 ### Training Configuration
 
-**Paper-aligned hyperparameters** (Section 3.3):
+**Paper-aligned hyperparameters** (from CLAUDE.md spec):
 
 | Parameter | Value | Notes |
 |-----------|-------|-------|
+| **Cross-validation** | 5-fold StratifiedGroupKFold | Grouped by post_id |
 | Learning rate | 2e-5 | AdamW optimizer |
 | Batch size | 8 | With gradient accumulation |
 | Grad accumulation | 4 | Effective batch: 32 |
-| Max epochs | 10-20 | With early stopping |
-| Patience | 3 epochs | Stop if no F1 improvement |
+| **Max epochs** | **100** | **Paper: up to 100** |
+| **Patience** | **20 epochs** | **Paper: early stopping patience=20** |
 | Dropout | 0.1 | Before classification head |
 | Max sequence length | 512 | Right-padded |
 | Weight decay | 0.01 | AdamW default |
+| **Input format** | Templated | `"post: {p}, criterion: {c} Does the post match the criterion description? Output yes or no"` |
 
 ### Expected Training Time
 
-- **A100 (80GB)**: ~2-3 hours (full model)
-- **V100 (32GB)**: ~4-6 hours (with gradient checkpointing)
-- **T4 (16GB)**: ~8-12 hours (batch_size=4)
-- **CPU**: Not recommended (>24 hours)
+**Per fold** (with early stopping, typically converges in 30-50 epochs):
+- **A100 (80GB)**: ~3-5 hours per fold
+- **V100 (32GB)**: ~6-10 hours per fold (with gradient checkpointing)
+- **T4 (16GB)**: ~12-20 hours per fold (batch_size=4)
+- **CPU**: Not recommended (>48 hours per fold)
+
+**Full 5-fold CV**: Multiply by 5 (or train folds in parallel on multiple GPUs)
 
 ### Terminal Visualization
 
