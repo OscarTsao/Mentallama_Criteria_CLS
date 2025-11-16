@@ -23,6 +23,7 @@ from Project.SubProject.data.dataset import (
 )
 from Project.SubProject.engine.train_engine import ClassificationTrainer
 from Project.SubProject.utils.seed import set_seed
+from Project.SubProject.utils.terminal_viz import TrainingVisualizer, print_model_info
 from sklearn.model_selection import train_test_split
 
 # Configure logging
@@ -131,28 +132,30 @@ def parse_args():
 def main():
     args = parse_args()
 
-    logger.info("=" * 70)
-    logger.info("MentalLLaMA Encoder-Style NLI Classifier Training")
-    logger.info("Paper: Adapting Decoder-Based LMs for Encoder Tasks")
-    logger.info("=" * 70)
+    # Create visualizer
+    viz = TrainingVisualizer(use_rich=True, use_plots=True)
+
+    # Display header
+    viz.print_header()
 
     # Set seed for reproducibility
-    logger.info(f"Setting random seed: {args.seed}")
+    viz.display_info(f"Setting random seed: {args.seed}")
     set_seed(args.seed)
 
     # Load model and tokenizer
-    logger.info(f"Loading model: {args.model_name}")
+    viz.display_info(f"Loading model: {args.model_name}")
     model, tokenizer = load_mentallama_for_nli(
         model_name=args.model_name,
         num_labels=args.num_labels,
         device=args.device
     )
-    logger.info(f"✓ Model loaded successfully")
-    logger.info(f"  Device: {args.device}")
-    logger.info(f"  Num labels: {args.num_labels}")
+    viz.display_success(f"Model loaded successfully")
+
+    # Display model info
+    print_model_info(model)
 
     # Load and convert data
-    logger.info("Loading ReDSM5 data...")
+    viz.display_info("Loading ReDSM5 data...")
     converter = ReDSM5toNLIConverter(
         posts_csv=f"{args.data_dir}/redsm5/redsm5_posts.csv",
         annotations_csv=f"{args.data_dir}/redsm5/redsm5_annotations.csv",
@@ -160,22 +163,36 @@ def main():
     )
     nli_df = converter.load_and_convert(include_negatives=True)
 
-    logger.info(f"✓ Loaded {len(nli_df)} NLI examples")
-    logger.info(f"  Positive (entailment): {(nli_df['label'] == 1).sum()}")
-    logger.info(f"  Negative (neutral): {(nli_df['label'] == 0).sum()}")
+    # Display data statistics
+    data_stats = {
+        'Total Examples': len(nli_df),
+        'Positive (Entailment)': int((nli_df['label'] == 1).sum()),
+        'Negative (Neutral)': int((nli_df['label'] == 0).sum()),
+    }
+    viz.display_data_stats(data_stats)
 
     # Split train/validation
-    logger.info(f"Splitting data (test_size={args.test_size})...")
+    viz.display_info(f"Splitting data (test_size={args.test_size})...")
     train_df, val_df = train_test_split(
         nli_df,
         test_size=args.test_size,
         random_state=args.seed,
         stratify=nli_df['label']
     )
-    logger.info(f"✓ Train: {len(train_df)}, Val: {len(val_df)}")
+
+    # Display split statistics
+    split_stats = {
+        'Training Examples': len(train_df),
+        'Validation Examples': len(val_df),
+        'Train Positive': int((train_df['label'] == 1).sum()),
+        'Train Negative': int((train_df['label'] == 0).sum()),
+        'Val Positive': int((val_df['label'] == 1).sum()),
+        'Val Negative': int((val_df['label'] == 0).sum()),
+    }
+    viz.display_data_stats(split_stats)
 
     # Create dataloaders
-    logger.info("Creating dataloaders...")
+    viz.display_info("Creating dataloaders...")
     train_loader, val_loader = create_nli_dataloaders(
         tokenizer,
         train_df,
@@ -183,10 +200,24 @@ def main():
         batch_size=args.batch_size,
         max_length=args.max_length,
     )
-    logger.info(f"✓ Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
+    viz.display_success(f"Dataloaders created: {len(train_loader)} train batches, {len(val_loader)} val batches")
+
+    # Display training configuration
+    training_config = {
+        'Learning Rate': args.lr,
+        'Batch Size': args.batch_size,
+        'Gradient Accumulation': args.grad_accum,
+        'Effective Batch Size': args.batch_size * args.grad_accum,
+        'Max Epochs': args.epochs,
+        'Early Stopping Patience': args.patience,
+        'Device': args.device,
+        'Max Sequence Length': args.max_length,
+        'Save Path': args.save_path,
+    }
+    viz.display_config(training_config)
 
     # Create trainer
-    logger.info("Creating trainer...")
+    viz.display_info("Creating trainer...")
     trainer = ClassificationTrainer(
         model=model,
         train_loader=train_loader,
@@ -198,33 +229,31 @@ def main():
         early_stopping_patience=args.patience,
         save_path=args.save_path,
     )
-
-    logger.info("Training configuration:")
-    logger.info(f"  Learning rate: {args.lr}")
-    logger.info(f"  Batch size: {args.batch_size}")
-    logger.info(f"  Gradient accumulation: {args.grad_accum}")
-    logger.info(f"  Effective batch size: {args.batch_size * args.grad_accum}")
-    logger.info(f"  Max epochs: {args.epochs}")
-    logger.info(f"  Early stopping patience: {args.patience}")
-    logger.info(f"  Save path: {args.save_path}")
+    viz.display_success("Trainer initialized")
 
     # Train
-    logger.info("=" * 70)
-    logger.info("Starting training...")
-    logger.info("=" * 70)
+    print()  # Add spacing before training starts
 
     history = trainer.train()
 
-    # Final results
-    logger.info("=" * 70)
-    logger.info("Training complete!")
-    logger.info("=" * 70)
-    logger.info(f"Best validation F1: {trainer.best_val_f1:.4f}")
-    logger.info(f"Final train loss: {history['train_loss'][-1]:.4f}")
-    logger.info(f"Final val loss: {history['val_loss'][-1]:.4f}")
-    logger.info(f"Final val accuracy: {history['val_accuracy'][-1]:.4f}")
-    logger.info(f"Model saved to: {args.save_path}")
-    logger.info("=" * 70)
+    # Display training curves
+    viz.plot_training_curves(history)
+
+    # Display final results
+    viz.display_training_complete(
+        best_f1=trainer.best_val_f1,
+        total_epochs=len(history['train_loss']),
+        save_path=args.save_path
+    )
+
+    # Display final metrics
+    final_metrics = {
+        'train_loss': history['train_loss'][-1],
+        'val_loss': history['val_loss'][-1],
+        'val_accuracy': history['val_accuracy'][-1],
+        'val_f1': history['val_f1'][-1] if 'val_f1' in history else trainer.best_val_f1,
+    }
+    viz.display_epoch_metrics(epoch=len(history['train_loss']) - 1, metrics=final_metrics)
 
 
 if __name__ == "__main__":

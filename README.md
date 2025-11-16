@@ -80,6 +80,8 @@ Core:
 - `peft>=0.7` - Parameter-efficient fine-tuning (DoRA)
 - `accelerate>=0.25` - Distributed training
 - `scikit-learn>=1.3` - Metrics and cross-validation
+- `rich>=13.0` - Rich terminal visualization
+- `plotext>=5.0` - Terminal plotting
 
 Optional:
 - `pytest>=7.4` - Testing
@@ -273,6 +275,63 @@ print(f"Best validation F1: {trainer.best_val_f1:.4f}")
 - **V100 (32GB)**: ~4-6 hours (with gradient checkpointing)
 - **T4 (16GB)**: ~8-12 hours (batch_size=4)
 - **CPU**: Not recommended (>24 hours)
+
+### Terminal Visualization
+
+The training script includes rich terminal visualization with:
+
+**Features:**
+- 🎨 Colored output with rich formatting
+- 📊 Progress bars with time estimates
+- 📈 Terminal plots for training curves
+- 📋 Formatted tables for metrics and configuration
+- ✅ Status indicators (success, warning, error, info)
+
+**Usage:**
+```bash
+# Standard training with visualization
+python scripts/train.py --batch-size 8 --epochs 10
+```
+
+The visualizer automatically displays:
+- Training header and model information
+- Configuration tables
+- Dataset statistics
+- Real-time progress bars
+- Epoch metrics (loss, F1, accuracy)
+- Training curves plotted in terminal
+- Final results summary
+
+**Programmatic Usage:**
+```python
+from src.Project.SubProject.utils.terminal_viz import TrainingVisualizer, print_model_info
+
+# Create visualizer
+viz = TrainingVisualizer(use_rich=True, use_plots=True)
+
+# Display header
+viz.print_header()
+
+# Display configuration
+config = {'batch_size': 8, 'learning_rate': 2e-5, 'epochs': 10}
+viz.display_config(config)
+
+# Display model info
+print_model_info(model)
+
+# Display epoch metrics
+metrics = {'train_loss': 0.35, 'val_f1': 0.82, 'val_accuracy': 0.85}
+viz.display_epoch_metrics(epoch=0, metrics=metrics)
+
+# Plot training curves
+history = {'train_loss': [...], 'val_loss': [...], 'val_f1': [...]}
+viz.plot_training_curves(history)
+
+# Display completion
+viz.display_training_complete(best_f1=0.82, total_epochs=10, save_path='model.pt')
+```
+
+**Note:** The visualizer gracefully falls back to plain text output if `rich` or `plotext` libraries are not available.
 
 ---
 
