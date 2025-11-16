@@ -143,6 +143,13 @@ def parse_args():
         choices=['cuda', 'cpu'],
         help='Device to use'
     )
+    parser.add_argument(
+        '--precision',
+        type=str,
+        default=None,
+        choices=['bf16', 'fp16', 'fp32', None],
+        help='Mixed precision mode (None=auto-detect, bf16=A100/H100, fp16=V100/T4, fp32=CPU/debug)'
+    )
 
     return parser.parse_args()
 
@@ -246,6 +253,7 @@ def train_single_fold(
         gradient_accumulation_steps=args.grad_accum,
         early_stopping_patience=args.patience,
         save_path=save_path,
+        precision=args.precision,
     )
     viz.display_success("Trainer initialized")
 
@@ -330,6 +338,7 @@ def main():
         'Max Epochs': args.epochs,
         'Early Stopping Patience': args.patience,
         'Device': args.device,
+        'Precision': args.precision if args.precision else 'auto-detect',
         'Max Sequence Length': args.max_length,
         'CV Folds': args.n_folds,
         'Output Directory': args.output_dir,

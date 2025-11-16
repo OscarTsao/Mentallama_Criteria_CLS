@@ -18,7 +18,8 @@ Usage:
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from typing import Dict, Optional, Tuple, List
+from torch.cuda.amp import autocast, GradScaler
+from typing import Dict, Optional, Tuple, List, Literal
 import logging
 from tqdm import tqdm
 import numpy as np
@@ -30,6 +31,26 @@ from sklearn.metrics import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def get_optimal_precision() -> Literal["bf16", "fp16", "fp32"]:
+    """
+    Detect optimal precision for current hardware.
+
+    Returns:
+        "bf16" if GPU supports bfloat16 (A100, H100, etc.)
+        "fp16" if GPU supports float16 (V100, T4, etc.)
+        "fp32" if CPU or old GPU
+    """
+    if not torch.cuda.is_available():
+        return "fp32"
+
+    # Check for bf16 support (Ampere and newer: A100, RTX 30xx, etc.)
+    if torch.cuda.is_bf16_supported():
+        return "bf16"
+
+    # Fallback to fp16 for older GPUs
+    return "fp16"
 
 
 class ClassificationTrainer:
@@ -53,9 +74,10 @@ class ClassificationTrainer:
         max_grad_norm: float = 1.0,
         early_stopping_patience: int = 3,
         save_path: Optional[str] = None,
+        precision: Optional[Literal["bf16", "fp16", "fp32"]] = None,
     ):
         """
-        Initialize trainer.
+        Initialize trainer with mixed precision support.
 
         Args:
             model: Model to train
@@ -69,6 +91,7 @@ class ClassificationTrainer:
             max_grad_norm: Max gradient norm for clipping
             early_stopping_patience: Patience for early stopping
             save_path: Path to save best model
+            precision: Mixed precision mode ("bf16", "fp16", "fp32", or None for auto-detect)
         """
         self.model = model.to(device)
         self.train_loader = train_loader
@@ -79,6 +102,28 @@ class ClassificationTrainer:
         self.max_grad_norm = max_grad_norm
         self.early_stopping_patience = early_stopping_patience
         self.save_path = save_path
+
+        # Mixed precision configuration (from CLAUDE.md:124)
+        # "Compute: gradient checkpointing, grad_accum=4, bf16 AMP when available"
+        if precision is None:
+            precision = get_optimal_precision()
+        self.precision = precision
+
+        # Configure mixed precision
+        self.use_amp = precision in ["bf16", "fp16"] and device == "cuda"
+        if self.use_amp:
+            self.autocast_dtype = torch.bfloat16 if precision == "bf16" else torch.float16
+            # GradScaler only needed for fp16 (bf16 doesn't need it)
+            self.scaler = GradScaler() if precision == "fp16" else None
+            logger.info(f"Mixed precision training enabled: {precision}")
+            if precision == "bf16":
+                logger.info("  Using bfloat16 (no GradScaler needed)")
+            else:
+                logger.info("  Using float16 (with GradScaler)")
+        else:
+            self.autocast_dtype = None
+            self.scaler = None
+            logger.info(f"Training in {precision} (no mixed precision)")
 
         # Create optimizer if not provided
         if optimizer is None:
@@ -126,36 +171,69 @@ class ClassificationTrainer:
             attention_mask = batch['attention_mask'].to(self.device)
             labels = batch['labels'].to(self.device)
 
-            # Forward pass
-            outputs = self.model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels,
-            )
+            # Forward pass with mixed precision (if enabled)
+            if self.use_amp:
+                with autocast(dtype=self.autocast_dtype):
+                    outputs = self.model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        labels=labels,
+                    )
 
-            # Get loss
-            if isinstance(outputs, dict):
-                loss = outputs['loss']
+                    # Get loss
+                    if isinstance(outputs, dict):
+                        loss = outputs['loss']
+                    else:
+                        logits = outputs[1] if isinstance(outputs, tuple) else outputs
+                        loss = self.loss_fn(logits, labels)
+
+                    # Scale loss for gradient accumulation
+                    loss = loss / self.gradient_accumulation_steps
             else:
-                logits = outputs[1] if isinstance(outputs, tuple) else outputs
-                loss = self.loss_fn(logits, labels)
+                # FP32 path (no autocast)
+                outputs = self.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                )
 
-            # Scale loss for gradient accumulation
-            loss = loss / self.gradient_accumulation_steps
+                # Get loss
+                if isinstance(outputs, dict):
+                    loss = outputs['loss']
+                else:
+                    logits = outputs[1] if isinstance(outputs, tuple) else outputs
+                    loss = self.loss_fn(logits, labels)
 
-            # Backward pass
-            loss.backward()
+                # Scale loss for gradient accumulation
+                loss = loss / self.gradient_accumulation_steps
+
+            # Backward pass (with or without scaler)
+            if self.scaler is not None:
+                # FP16 path with GradScaler
+                self.scaler.scale(loss).backward()
+            else:
+                # BF16 or FP32 path (no scaler needed)
+                loss.backward()
 
             # Update weights
             if (step + 1) % self.gradient_accumulation_steps == 0:
-                # Clip gradients
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(),
-                    self.max_grad_norm
-                )
+                if self.scaler is not None:
+                    # FP16 path with GradScaler
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(),
+                        self.max_grad_norm
+                    )
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    # BF16 or FP32 path
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(),
+                        self.max_grad_norm
+                    )
+                    self.optimizer.step()
 
-                # Optimizer step
-                self.optimizer.step()
                 self.optimizer.zero_grad()
 
             total_loss += loss.item() * self.gradient_accumulation_steps
@@ -198,12 +276,20 @@ class ClassificationTrainer:
             attention_mask = batch['attention_mask'].to(self.device)
             labels = batch['labels'].to(self.device)
 
-            # Forward pass
-            outputs = self.model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels,
-            )
+            # Forward pass with mixed precision (if enabled)
+            if self.use_amp:
+                with autocast(dtype=self.autocast_dtype):
+                    outputs = self.model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        labels=labels,
+                    )
+            else:
+                outputs = self.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                )
 
             # Get logits and loss
             if isinstance(outputs, dict):
