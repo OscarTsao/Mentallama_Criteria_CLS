@@ -22,7 +22,7 @@ from Project.SubProject.data.dataset import (
     create_nli_dataloaders
 )
 from Project.SubProject.engine.train_engine import ClassificationTrainer, create_experiment_dir
-from Project.SubProject.utils.seed import set_seed
+from Project.SubProject.utils.seed import set_seed, enable_tf32
 from Project.SubProject.utils.terminal_viz import TrainingVisualizer, print_model_info
 from sklearn.model_selection import train_test_split
 
@@ -145,9 +145,13 @@ def main():
     # Display header
     viz.print_header()
 
-    # Set seed for reproducibility
-    viz.display_info(f"Setting random seed: {args.seed}")
-    set_seed(args.seed)
+    # Enable hardware optimizations
+    viz.display_info("Enabling hardware optimizations (TF32, cudnn.benchmark)")
+    enable_tf32()
+
+    # Set seed (deterministic=False for faster training with cudnn.benchmark)
+    viz.display_info(f"Setting random seed: {args.seed} (deterministic=False for speed)")
+    set_seed(args.seed, deterministic=False)
 
     # Load model and tokenizer
     viz.display_info(f"Loading model: {args.model_name}")

@@ -329,10 +329,10 @@ def create_nli_dataloaders(
     val_df: Optional[pd.DataFrame] = None,
     batch_size: int = 8,
     max_length: int = 512,
-    num_workers: int = 0,
+    num_workers: int = 4,
 ) -> Tuple[DataLoader, Optional[DataLoader]]:
     """
-    Create train and validation dataloaders.
+    Create train and validation dataloaders with hardware optimizations.
 
     Args:
         tokenizer: HuggingFace tokenizer
@@ -340,10 +340,14 @@ def create_nli_dataloaders(
         val_df: Validation data DataFrame (optional)
         batch_size: Batch size
         max_length: Maximum sequence length
-        num_workers: Number of dataloader workers
+        num_workers: Number of dataloader workers (default: 4 for faster I/O)
 
     Returns:
         (train_loader, val_loader) tuple
+
+    Note:
+        - pin_memory=True is enabled for faster GPU transfer
+        - num_workers=4 provides good I/O parallelism without overhead
     """
     train_dataset = MentalHealthNLIDataset(
         train_df,
