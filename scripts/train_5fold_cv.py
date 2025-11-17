@@ -312,7 +312,10 @@ def main():
         annotations_csv=f"{args.data_dir}/redsm5/redsm5_annotations.csv",
         criteria_json=f"{args.data_dir}/DSM5/MDD_Criteira.json",
     )
-    nli_df = converter.load_and_convert(include_negatives=True)
+    nli_df = converter.load_and_convert(
+        include_negatives=True,
+        exhaustive_pairing=True  # Create ALL (sentence, criterion) pairs
+    )
 
     # Display data statistics
     data_stats = {

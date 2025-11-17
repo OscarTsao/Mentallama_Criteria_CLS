@@ -75,6 +75,10 @@ class DSM5CriteriaMapping:
         """Get all symptom names."""
         return list(self.symptom_to_criterion.keys())
 
+    def get_all_criteria(self) -> Dict[str, str]:
+        """Get all 9 DSM-5 criteria as {symptom_name: criterion_text}."""
+        return self.symptom_to_criterion.copy()
+
 
 class ReDSM5toNLIConverter:
     """Converts ReDSM5 dataset to NLI format."""
@@ -106,6 +110,7 @@ class ReDSM5toNLIConverter:
         self,
         include_negatives: bool = True,
         negative_sampling_ratio: float = 1.0,
+        exhaustive_pairing: bool = True,
     ) -> pd.DataFrame:
         """
         Load ReDSM5 data and convert to NLI format.
@@ -114,6 +119,8 @@ class ReDSM5toNLIConverter:
             include_negatives: Whether to include negative examples (status=0)
             negative_sampling_ratio: Ratio of negatives to positives (if < 1.0,
                 randomly sample negatives)
+            exhaustive_pairing: If True, create ALL (sentence, criterion) pairs using
+                Cartesian product. If False, only use pairs from annotations.csv.
 
         Returns:
             DataFrame with columns:
@@ -129,42 +136,100 @@ class ReDSM5toNLIConverter:
 
         logger.info(f"Loaded {len(df)} annotations")
         logger.info(f"Unique posts: {df['post_id'].nunique()}")
+        logger.info(f"Unique sentences: {df['sentence_text'].nunique()}")
         logger.info(f"Unique symptoms: {df['DSM5_symptom'].nunique()}")
 
-        # Convert to NLI format
-        nli_data = []
+        if exhaustive_pairing:
+            # EXHAUSTIVE PAIRING APPROACH (Cartesian Product)
+            # Create ALL (sentence, criterion) pairs from posts × criteria
+            # Use annotations.csv as ground truth lookup
+            logger.info("Using exhaustive pairing: ALL sentences × ALL 9 criteria")
 
-        for idx, row in df.iterrows():
-            sentence_text = row['sentence_text']
-            symptom = row['DSM5_symptom']
-            status = row['status']
-            post_id = row['post_id']
-            sentence_id = row['sentence_id']
+            # Get all unique sentences with metadata
+            sentence_info = df[['post_id', 'sentence_id', 'sentence_text']].drop_duplicates()
+            logger.info(f"Found {len(sentence_info)} unique sentences")
 
-            # Get DSM-5 criterion text for this symptom
-            criterion_text = self.criteria_map.get_criterion_text(symptom)
+            # Get all 9 DSM-5 criteria
+            all_criteria = self.criteria_map.get_all_criteria()
+            logger.info(f"Found {len(all_criteria)} DSM-5 criteria")
 
-            if not criterion_text:
-                logger.warning(f"No criterion text for symptom: {symptom}")
-                continue
+            # Create ground truth lookup: (sentence_text, symptom) → status
+            ground_truth = {}
+            for _, row in df.iterrows():
+                key = (row['sentence_text'], row['DSM5_symptom'])
+                ground_truth[key] = row['status']
 
-            # Convert status to binary label
-            # status=1 means sentence matches criterion (entailment)
-            # status=0 means sentence doesn't match (neutral/contradiction)
-            label = 1 if status == 1 else 0
+            logger.info(f"Built ground truth lookup with {len(ground_truth)} entries")
 
-            # Skip negatives if requested
-            if label == 0 and not include_negatives:
-                continue
+            # Create Cartesian product: all_sentences × all_criteria
+            nli_data = []
+            for _, sent_row in sentence_info.iterrows():
+                sentence_text = sent_row['sentence_text']
+                post_id = sent_row['post_id']
+                sentence_id = sent_row['sentence_id']
 
-            nli_data.append({
-                'premise': sentence_text,
-                'hypothesis': criterion_text,
-                'label': label,
-                'post_id': post_id,
-                'sentence_id': sentence_id,
-                'symptom': symptom,
-            })
+                for symptom, criterion_text in all_criteria.items():
+                    # Lookup ground truth
+                    key = (sentence_text, symptom)
+                    status = ground_truth.get(key, 0)  # Default to 0 if not annotated
+
+                    # Convert status to binary label
+                    # status=1 → label=1 (entailment)
+                    # status=0 or not in annotations → label=0 (neutral)
+                    label = 1 if status == 1 else 0
+
+                    # Skip negatives if requested
+                    if label == 0 and not include_negatives:
+                        continue
+
+                    nli_data.append({
+                        'premise': sentence_text,
+                        'hypothesis': criterion_text,
+                        'label': label,
+                        'post_id': post_id,
+                        'sentence_id': sentence_id,
+                        'symptom': symptom,
+                    })
+
+            logger.info(f"Created {len(nli_data)} NLI pairs via Cartesian product")
+            logger.info(f"  Total possible pairs: {len(sentence_info)} × {len(all_criteria)} = {len(sentence_info) * len(all_criteria)}")
+
+        else:
+            # SPARSE PAIRING APPROACH (Original)
+            # Only create pairs that exist in annotations.csv
+            logger.info("Using sparse pairing: only annotated pairs from annotations.csv")
+
+            nli_data = []
+
+            for idx, row in df.iterrows():
+                sentence_text = row['sentence_text']
+                symptom = row['DSM5_symptom']
+                status = row['status']
+                post_id = row['post_id']
+                sentence_id = row['sentence_id']
+
+                # Get DSM-5 criterion text for this symptom
+                criterion_text = self.criteria_map.get_criterion_text(symptom)
+
+                if not criterion_text:
+                    logger.warning(f"No criterion text for symptom: {symptom}")
+                    continue
+
+                # Convert status to binary label
+                label = 1 if status == 1 else 0
+
+                # Skip negatives if requested
+                if label == 0 and not include_negatives:
+                    continue
+
+                nli_data.append({
+                    'premise': sentence_text,
+                    'hypothesis': criterion_text,
+                    'label': label,
+                    'post_id': post_id,
+                    'sentence_id': sentence_id,
+                    'symptom': symptom,
+                })
 
         nli_df = pd.DataFrame(nli_data)
 

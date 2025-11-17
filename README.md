@@ -155,9 +155,21 @@ python examples/inference_example.py
 
 ### ReDSM5 → NLI Conversion
 
-The pipeline converts ReDSM5 annotations to NLI format:
+The pipeline converts ReDSM5 to NLI using **exhaustive pairing** (Cartesian product):
 
-**Input** (ReDSM5):
+**Approach**: Create ALL possible (sentence, criterion) pairs
+- Take all unique sentences from posts
+- Pair with all 9 DSM-5 criteria
+- Use annotations.csv as ground truth lookup
+
+**Labeling Strategy**:
+- If (sentence, criterion) in annotations.csv with **status=1** → **label=1** (entailment)
+- If (sentence, criterion) in annotations.csv with **status=0** → **label=0** (neutral)
+- If (sentence, criterion) **NOT in annotations.csv** → **label=0** (neutral)
+
+**Example**:
+
+*Annotation from ReDSM5*:
 ```json
 {
   "sentence_text": "I can't sleep at night anymore",
@@ -166,7 +178,22 @@ The pipeline converts ReDSM5 annotations to NLI format:
 }
 ```
 
-**Output** (NLI):
+*Generated NLI Pairs* (1 sentence × 9 criteria):
+```json
+[
+  {"premise": "I can't sleep...", "hypothesis": "Depressed mood...", "label": 0},
+  {"premise": "I can't sleep...", "hypothesis": "Anhedonia...", "label": 0},
+  {"premise": "I can't sleep...", "hypothesis": "Weight changes...", "label": 0},
+  {"premise": "I can't sleep...", "hypothesis": "Insomnia or hypersomnia...", "label": 1},  // ✓ status=1
+  {"premise": "I can't sleep...", "hypothesis": "Psychomotor...", "label": 0},
+  {"premise": "I can't sleep...", "hypothesis": "Fatigue...", "label": 0},
+  {"premise": "I can't sleep...", "hypothesis": "Worthlessness...", "label": 0},
+  {"premise": "I can't sleep...", "hypothesis": "Cognitive issues...", "label": 0},
+  {"premise": "I can't sleep...", "hypothesis": "Suicidal thoughts...", "label": 0}
+]
+```
+
+**Output Structure**:
 ```json
 {
   "premise": "I can't sleep at night anymore",
@@ -212,10 +239,17 @@ This template is automatically applied by `MentalHealthNLIDataset` during tokeni
 
 ### Data Statistics
 
+**With Exhaustive Pairing** (default):
 - **Posts**: 1,484
-- **Sentences**: ~13,000
-- **NLI pairs**: ~13,000
-- **Class balance**: ~75% negative, ~25% positive
+- **Unique sentences**: ~13,000
+- **NLI pairs**: **~117,000** (13,000 sentences × 9 criteria)
+- **Positive examples** (status=1): ~2,500
+- **Negative examples**: ~114,500
+  - From status=0: ~10,500
+  - From unannotated pairs: ~104,000
+- **Class balance**: ~2% positive, ~98% negative
+
+**Note**: The class imbalance is expected and realistic for mental health NLI tasks. Most sentence-criterion pairs don't match.
 
 ---
 
