@@ -1,9 +1,8 @@
 import os
 import random
-from typing import Optional
 
 
-def set_seed(seed: int = 42, deterministic: bool = True, env_var: Optional[str] = None) -> int:
+def set_seed(seed: int = 42, deterministic: bool = True, env_var: str | None = None) -> int:
     """Set RNG seeds for Python, NumPy, and PyTorch (if available).
 
     - If `env_var` is provided and set, it overrides the `seed`.

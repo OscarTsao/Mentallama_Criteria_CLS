@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import contextlib
-from typing import Any, Dict, Iterator, Optional
+from collections.abc import Iterator
+from typing import Any
 
 
 def configure_mlflow(
-    tracking_uri: Optional[str] = None,
-    experiment: Optional[str] = None,
-    tags: Optional[Dict[str, str]] = None,
+    tracking_uri: str | None = None,
+    experiment: str | None = None,
+    tags: dict[str, str] | None = None,
 ) -> None:
     """Configure MLflow tracking URI and experiment.
 
@@ -52,17 +53,17 @@ def enable_autologging(enable: bool = True) -> None:
     for mod_name in ("mlflow.pytorch", "mlflow.sklearn", "mlflow.xgboost", "mlflow.lightgbm"):
         try:
             mod = __import__(mod_name, fromlist=["autolog"])  # type: ignore
-            getattr(mod, "autolog")()
+            mod.autolog()
         except Exception:
             continue
 
 
 @contextlib.contextmanager
 def mlflow_run(
-    name: Optional[str] = None,
+    name: str | None = None,
     nested: bool = False,
-    tags: Optional[Dict[str, str]] = None,
-    params: Optional[Dict[str, Any]] = None,
+    tags: dict[str, str] | None = None,
+    params: dict[str, Any] | None = None,
 ) -> Iterator[Any]:
     """Context manager that starts and ends an MLflow run.
 
