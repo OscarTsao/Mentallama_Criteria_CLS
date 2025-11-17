@@ -60,6 +60,12 @@ class MentallamClassifier(nn.Module):
             torch_dtype=torch.float16 if not load_in_8bit else None,
         )
 
+        # Load tokenizer first (before PEFT)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+            self.model.config.pad_token_id = self.model.config.eos_token_id
+
         # Enable gradient checkpointing
         if gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
@@ -68,12 +74,6 @@ class MentallamClassifier(nn.Module):
         # Apply PEFT/DoRA
         if use_peft:
             self._apply_peft(peft_config or {})
-
-        # Load tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-            self.model.config.pad_token_id = self.model.config.eos_token_id
 
         logger.info(f"Model loaded with {self.count_parameters():,} trainable parameters")
 
