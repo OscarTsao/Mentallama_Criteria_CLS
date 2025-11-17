@@ -1,304 +1,413 @@
 """
-Mental Health Classification Dataset
+PATCH 02: ReDSM5 → NLI Data Pipeline
 
-Loads and processes (post, criterion) pairs from RedSM5 annotations
-and DSM-5 criteria for binary classification.
+This patch provides data loading and NLI conversion for ReDSM5 dataset.
+
+Converts:
+    ReDSM5 (post, sentence, symptom, status)
+    → NLI (premise, hypothesis, label)
+
+Where:
+    - premise = sentence_text (from redsm5_annotations.csv)
+    - hypothesis = DSM-5 criterion text (from MDD_Criteira.json)
+    - label = 1 if status==1 (sentence matches symptom), else 0
+
+Usage:
+    cp PATCH_02_data_pipeline.py src/Project/SubProject/data/dataset.py
 """
 
-import hashlib
 import json
-import uuid
-from dataclasses import dataclass
-from pathlib import Path
-
 import pandas as pd
-from torch.utils.data import Dataset
+import torch
+from torch.utils.data import Dataset, DataLoader
+from transformers import AutoTokenizer
+from typing import Dict, List, Tuple, Optional
+from pathlib import Path
+import logging
 
-from Project.SubProject.utils.log import get_logger
-
-logger = get_logger(__name__)
-
-
-# Mapping from symptom names in annotations to criterion IDs
-SYMPTOM_TO_CRITERION = {
-    'DEPRESSED_MOOD': 'A.1',
-    'ANHEDONIA': 'A.2',
-    'APPETITE_ISSUES': 'A.3',
-    'WEIGHT_CHANGE': 'A.3',
-    'SLEEP_ISSUES': 'A.4',
-    'PSYCHOMOTOR': 'A.5',
-    'FATIGUE': 'A.6',
-    'WORTHLESSNESS': 'A.7',
-    'GUILT': 'A.7',
-    'COGNITIVE_ISSUES': 'A.8',
-    'CONCENTRATION': 'A.8',
-    'SUICIDAL': 'A.9',
-    'DEATH_THOUGHTS': 'A.9',
-}
+logger = logging.getLogger(__name__)
 
 
-@dataclass
-class Sample:
-    """Represents a single (post, criterion) pair"""
-    sample_id: str
-    post_id: str
-    criterion_id: str
-    post_text: str
-    criterion_text: str
-    label: int  # 0=unmatched, 1=matched
+class DSM5CriteriaMapping:
+    """Maps DSM-5 symptom names to criterion text."""
 
-    def __post_init__(self):
-        # Validate label
-        if self.label not in {0, 1}:
-            raise ValueError(f"Label must be 0 or 1, got {self.label}")
+    def __init__(self, criteria_json_path: str = "data/DSM5/MDD_Criteira.json"):
+        """
+        Load DSM-5 criteria from JSON file.
 
-        # Normalize text
-        self.post_text = self._normalize_text(self.post_text)
-        self.criterion_text = self._normalize_text(self.criterion_text)
+        Expected format:
+        {
+            "diagnosis": "Major Depressive Disorder",
+            "criteria": [
+                {"id": "A.1", "text": "Depressed mood..."},
+                ...
+            ]
+        }
+        """
+        with open(criteria_json_path, 'r') as f:
+            data = json.load(f)
 
-        # Validate non-empty
-        if not self.post_text or not self.criterion_text:
-            raise ValueError("Post and criterion text must not be empty")
+        # Build mapping from criterion ID to text
+        self.id_to_text = {
+            item['id']: item['text']
+            for item in data['criteria']
+        }
 
-    @staticmethod
-    def _normalize_text(text: str) -> str:
-        """Normalize unicode and trim whitespace"""
-        import unicodedata
-        text = unicodedata.normalize('NFKC', text)
-        return text.strip()
+        # Build mapping from symptom name (in annotations) to criterion text
+        # Based on the ReDSM5 annotation format
+        self.symptom_to_criterion = {
+            'DEPRESSED_MOOD': self.id_to_text.get('A.1', ''),
+            'ANHEDONIA': self.id_to_text.get('A.2', ''),
+            'WEIGHT_APPETITE': self.id_to_text.get('A.3', ''),
+            'SLEEP_ISSUES': self.id_to_text.get('A.4', ''),
+            'PSYCHOMOTOR': self.id_to_text.get('A.5', ''),
+            'FATIGUE': self.id_to_text.get('A.6', ''),
+            'WORTHLESSNESS': self.id_to_text.get('A.7', ''),
+            'COGNITIVE_ISSUES': self.id_to_text.get('A.8', ''),
+            'SUICIDAL': self.id_to_text.get('A.9', ''),
+        }
+
+    def get_criterion_text(self, symptom_name: str) -> str:
+        """Get DSM-5 criterion text for a given symptom name."""
+        return self.symptom_to_criterion.get(symptom_name, "")
+
+    def get_all_symptoms(self) -> List[str]:
+        """Get all symptom names."""
+        return list(self.symptom_to_criterion.keys())
+
+    def get_all_criteria(self) -> Dict[str, str]:
+        """Get all 9 DSM-5 criteria as {symptom_name: criterion_text}."""
+        return self.symptom_to_criterion.copy()
 
 
-class MentalHealthDataset(Dataset):
-    """
-    Dataset for mental health classification
-
-    Loads posts from RedSM5 and criteria from DSM-5, creates (post, criterion)
-    pairs based on annotations.
-    """
+class ReDSM5toNLIConverter:
+    """Converts ReDSM5 dataset to NLI format."""
 
     def __init__(
         self,
-        redsm5_path: str,
-        dsm5_path: str,
-        override_counts: bool = False,
+        posts_csv: str = "data/redsm5/redsm5_posts.csv",
+        annotations_csv: str = "data/redsm5/redsm5_annotations.csv",
+        criteria_json: str = "data/DSM5/MDD_Criteira.json",
     ):
         """
+        Initialize converter with data file paths.
+
         Args:
-            redsm5_path: Path to RedSM5 data directory
-            dsm5_path: Path to DSM5 data directory
-            override_counts: Skip expected count validation
+            posts_csv: Path to posts CSV (post_id, text)
+            annotations_csv: Path to annotations CSV (post_id, sentence_id,
+                sentence_text, DSM5_symptom, status, explanation)
+            criteria_json: Path to DSM-5 criteria JSON
         """
-        self.redsm5_path = Path(redsm5_path)
-        self.dsm5_path = Path(dsm5_path)
-        self.override_counts = override_counts
+        self.posts_csv = posts_csv
+        self.annotations_csv = annotations_csv
 
-        # Load data
-        self.criteria = self._load_criteria()
-        self.posts = self._load_posts()
-        self.samples = self._create_samples()
+        # Load DSM-5 criteria mapping
+        self.criteria_map = DSM5CriteriaMapping(criteria_json)
 
-        # Validate counts
-        self._validate_cardinality()
+        logger.info(f"Loading data from {annotations_csv}")
 
-        # Log statistics
-        self._log_statistics()
+    def load_and_convert(
+        self,
+        include_negatives: bool = True,
+        negative_sampling_ratio: float = 1.0,
+        exhaustive_pairing: bool = True,
+    ) -> pd.DataFrame:
+        """
+        Load ReDSM5 data and convert to NLI format.
 
-    def _load_criteria(self) -> dict[str, str]:
-        """Load DSM-5 criteria from JSON"""
-        # Try both possible filenames (there's a typo in the actual file)
-        possible_files = [
-            self.dsm5_path / "MDD_Criteria.json",
-            self.dsm5_path / "MDD_Criteira.json",  # typo version
-            self.dsm5_path / "criteria.csv",
-        ]
+        Args:
+            include_negatives: Whether to include negative examples (status=0)
+            negative_sampling_ratio: Ratio of negatives to positives (if < 1.0,
+                randomly sample negatives)
+            exhaustive_pairing: If True, create ALL (sentence, criterion) pairs using
+                Cartesian product. If False, only use pairs from annotations.csv.
 
-        criteria_dict = {}
+        Returns:
+            DataFrame with columns:
+                - premise (sentence_text)
+                - hypothesis (DSM-5 criterion text)
+                - label (1=entailment, 0=neutral/contradiction)
+                - post_id (for grouping in cross-validation)
+                - sentence_id (for tracking)
+                - symptom (original symptom name)
+        """
+        # Load annotations
+        df = pd.read_csv(self.annotations_csv)
 
-        for filepath in possible_files:
-            if filepath.exists():
-                if filepath.suffix == '.json':
-                    with open(filepath) as f:
-                        data = json.load(f)
-                        for criterion in data['criteria']:
-                            criteria_dict[criterion['id']] = criterion['text']
-                    logger.info(f"Loaded {len(criteria_dict)} criteria from {filepath}")
-                    return criteria_dict
-                elif filepath.suffix == '.csv':
-                    df = pd.read_csv(filepath)
-                    for _, row in df.iterrows():
-                        criteria_dict[row['criterion_id']] = row['criterion_text']
-                    logger.info(f"Loaded {len(criteria_dict)} criteria from {filepath}")
-                    return criteria_dict
+        logger.info(f"Loaded {len(df)} annotations")
+        logger.info(f"Unique posts: {df['post_id'].nunique()}")
+        logger.info(f"Unique sentences: {df['sentence_text'].nunique()}")
+        logger.info(f"Unique symptoms: {df['DSM5_symptom'].nunique()}")
 
-        raise FileNotFoundError(
-            f"Could not find criteria file in {self.dsm5_path}. "
-            f"Tried: {[f.name for f in possible_files]}"
-        )
+        if exhaustive_pairing:
+            # EXHAUSTIVE PAIRING APPROACH (Cartesian Product)
+            # Create ALL (sentence, criterion) pairs from posts × criteria
+            # Use annotations.csv as ground truth lookup
+            logger.info("Using exhaustive pairing: ALL sentences × ALL 9 criteria")
 
-    def _load_posts(self) -> dict[str, str]:
-        """Load posts from RedSM5 CSV"""
-        posts_file = self.redsm5_path / "redsm5_posts.csv"
+            # Get all unique sentences with metadata
+            sentence_info = df[['post_id', 'sentence_id', 'sentence_text']].drop_duplicates()
+            logger.info(f"Found {len(sentence_info)} unique sentences")
 
-        if not posts_file.exists():
-            # Try alternative names
-            for name in ["posts.csv", "redsm5_posts.csv"]:
-                alt_file = self.redsm5_path / name
-                if alt_file.exists():
-                    posts_file = alt_file
-                    break
-            else:
-                raise FileNotFoundError(f"Posts file not found in {self.redsm5_path}")
+            # Get all 9 DSM-5 criteria
+            all_criteria = self.criteria_map.get_all_criteria()
+            logger.info(f"Found {len(all_criteria)} DSM-5 criteria")
 
-        df = pd.read_csv(posts_file)
-        posts_dict = dict(zip(df['post_id'], df['text']))
+            # Create ground truth lookup: (sentence_text, symptom) → status
+            ground_truth = {}
+            for _, row in df.iterrows():
+                key = (row['sentence_text'], row['DSM5_symptom'])
+                ground_truth[key] = row['status']
 
-        logger.info(f"Loaded {len(posts_dict)} posts from {posts_file}")
-        return posts_dict
+            logger.info(f"Built ground truth lookup with {len(ground_truth)} entries")
 
-    def _create_samples(self) -> list[Sample]:
-        """Create (post, criterion) pairs from annotations"""
-        annotations_file = self.redsm5_path / "redsm5_annotations.csv"
+            # Create Cartesian product: all_sentences × all_criteria
+            nli_data = []
+            for _, sent_row in sentence_info.iterrows():
+                sentence_text = sent_row['sentence_text']
+                post_id = sent_row['post_id']
+                sentence_id = sent_row['sentence_id']
 
-        if not annotations_file.exists():
-            # Try alternative names
-            for name in ["annotations.csv", "labels.csv", "redsm5_annotations.csv"]:
-                alt_file = self.redsm5_path / name
-                if alt_file.exists():
-                    annotations_file = alt_file
-                    break
-            else:
-                raise FileNotFoundError(f"Annotations file not found in {self.redsm5_path}")
+                for symptom, criterion_text in all_criteria.items():
+                    # Lookup ground truth
+                    key = (sentence_text, symptom)
+                    status = ground_truth.get(key, 0)  # Default to 0 if not annotated
 
-        df = pd.read_csv(annotations_file)
+                    # Convert status to binary label
+                    # status=1 → label=1 (entailment)
+                    # status=0 or not in annotations → label=0 (neutral)
+                    label = 1 if status == 1 else 0
 
-        samples = []
-        skipped = 0
+                    # Skip negatives if requested
+                    if label == 0 and not include_negatives:
+                        continue
 
-        for _, row in df.iterrows():
-            post_id = row['post_id']
-            symptom = row['DSM5_symptom']
-            label = int(row['status'])
+                    nli_data.append({
+                        'premise': sentence_text,
+                        'hypothesis': criterion_text,
+                        'label': label,
+                        'post_id': post_id,
+                        'sentence_id': sentence_id,
+                        'symptom': symptom,
+                    })
 
-            # Map symptom to criterion ID
-            criterion_id = SYMPTOM_TO_CRITERION.get(symptom)
-            if criterion_id is None:
-                logger.warning(f"Unknown symptom '{symptom}', skipping")
-                skipped += 1
-                continue
+            logger.info(f"Created {len(nli_data)} NLI pairs via Cartesian product")
+            logger.info(f"  Total possible pairs: {len(sentence_info)} × {len(all_criteria)} = {len(sentence_info) * len(all_criteria)}")
 
-            # Get post text
-            post_text = self.posts.get(post_id)
-            if post_text is None:
-                logger.warning(f"Post {post_id} not found, skipping")
-                skipped += 1
-                continue
+        else:
+            # SPARSE PAIRING APPROACH (Original)
+            # Only create pairs that exist in annotations.csv
+            logger.info("Using sparse pairing: only annotated pairs from annotations.csv")
 
-            # Get criterion text
-            criterion_text = self.criteria.get(criterion_id)
-            if criterion_text is None:
-                logger.warning(f"Criterion {criterion_id} not found, skipping")
-                skipped += 1
-                continue
+            nli_data = []
 
-            # Create sample
-            try:
-                sample = Sample(
-                    sample_id=str(uuid.uuid4()),
-                    post_id=post_id,
-                    criterion_id=criterion_id,
-                    post_text=post_text,
-                    criterion_text=criterion_text,
-                    label=label,
-                )
-                samples.append(sample)
-            except ValueError as e:
-                logger.warning(f"Invalid sample: {e}, skipping")
-                skipped += 1
-                continue
+            for idx, row in df.iterrows():
+                sentence_text = row['sentence_text']
+                symptom = row['DSM5_symptom']
+                status = row['status']
+                post_id = row['post_id']
+                sentence_id = row['sentence_id']
 
-        logger.info(f"Created {len(samples)} samples, skipped {skipped}")
-        return samples
+                # Get DSM-5 criterion text for this symptom
+                criterion_text = self.criteria_map.get_criterion_text(symptom)
 
-    def _validate_cardinality(self):
-        """Validate expected counts"""
-        if self.override_counts:
-            logger.warning("Count validation overridden")
-            return
+                if not criterion_text:
+                    logger.warning(f"No criterion text for symptom: {symptom}")
+                    continue
 
-        # Expected counts from spec (may need adjustment based on actual data)
-        # expected_posts = 1484
-        # expected_criteria = 9
-        # expected_samples = 13356
+                # Convert status to binary label
+                label = 1 if status == 1 else 0
 
-        # For now, just log actual counts
-        unique_posts = len(set(s.post_id for s in self.samples))
-        unique_criteria = len(set(s.criterion_id for s in self.samples))
+                # Skip negatives if requested
+                if label == 0 and not include_negatives:
+                    continue
 
-        logger.info(
-            f"Cardinality: {unique_posts} unique posts, "
-            f"{unique_criteria} unique criteria, "
-            f"{len(self.samples)} total samples"
-        )
+                nli_data.append({
+                    'premise': sentence_text,
+                    'hypothesis': criterion_text,
+                    'label': label,
+                    'post_id': post_id,
+                    'sentence_id': sentence_id,
+                    'symptom': symptom,
+                })
 
-    def _log_statistics(self):
-        """Log dataset statistics"""
-        total = len(self.samples)
-        positive = sum(s.label for s in self.samples)
-        negative = total - positive
+        nli_df = pd.DataFrame(nli_data)
 
-        logger.info(
-            f"Label distribution: {positive}/{total} positive "
-            f"({100*positive/total:.1f}%), "
-            f"{negative}/{total} negative ({100*negative/total:.1f}%)"
-        )
+        # Sample negatives if ratio < 1.0
+        if negative_sampling_ratio < 1.0 and include_negatives:
+            pos = nli_df[nli_df['label'] == 1]
+            neg = nli_df[nli_df['label'] == 0]
 
-        # Per-criterion stats
-        criterion_stats = {}
-        for sample in self.samples:
-            cid = sample.criterion_id
-            if cid not in criterion_stats:
-                criterion_stats[cid] = {'total': 0, 'positive': 0}
-            criterion_stats[cid]['total'] += 1
-            criterion_stats[cid]['positive'] += sample.label
+            n_pos = len(pos)
+            n_neg_target = int(n_pos * negative_sampling_ratio)
 
-        logger.info("Per-criterion distribution:")
-        for cid in sorted(criterion_stats.keys()):
-            stats = criterion_stats[cid]
-            pos = stats['positive']
-            tot = stats['total']
-            logger.info(f"  {cid}: {pos}/{tot} ({100*pos/tot:.1f}% positive)")
+            if n_neg_target < len(neg):
+                neg = neg.sample(n=n_neg_target, random_state=42)
 
-    def get_dataset_hash(self) -> str:
-        """Compute hash of source data for tracking"""
-        hasher = hashlib.sha256()
+            nli_df = pd.concat([pos, neg]).reset_index(drop=True)
 
-        # Hash posts
-        for post_id in sorted(self.posts.keys()):
-            hasher.update(post_id.encode())
-            hasher.update(self.posts[post_id].encode())
+        logger.info(f"Created {len(nli_df)} NLI examples")
+        logger.info(f"Positive examples: {(nli_df['label'] == 1).sum()}")
+        logger.info(f"Negative examples: {(nli_df['label'] == 0).sum()}")
 
-        # Hash criteria
-        for cid in sorted(self.criteria.keys()):
-            hasher.update(cid.encode())
-            hasher.update(self.criteria[cid].encode())
+        return nli_df
 
-        return hasher.hexdigest()[:16]
+
+class MentalHealthNLIDataset(Dataset):
+    """PyTorch Dataset for Mental Health NLI task."""
+
+    def __init__(
+        self,
+        dataframe: pd.DataFrame,
+        tokenizer: AutoTokenizer,
+        max_length: int = 512,
+        premise_col: str = 'premise',
+        hypothesis_col: str = 'hypothesis',
+        label_col: str = 'label',
+    ):
+        """
+        Initialize dataset.
+
+        Args:
+            dataframe: DataFrame with NLI data
+            tokenizer: HuggingFace tokenizer
+            max_length: Maximum sequence length
+            premise_col: Name of premise column
+            hypothesis_col: Name of hypothesis column
+            label_col: Name of label column
+        """
+        self.data = dataframe.reset_index(drop=True)
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.premise_col = premise_col
+        self.hypothesis_col = hypothesis_col
+        self.label_col = label_col
 
     def __len__(self) -> int:
-        return len(self.samples)
+        return len(self.data)
 
-    def __getitem__(self, idx: int) -> dict:
-        """Get a sample by index"""
-        sample = self.samples[idx]
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        """
+        Get a single example.
+
+        Returns:
+            dict with keys: input_ids, attention_mask, labels
+        """
+        row = self.data.iloc[idx]
+
+        premise = str(row[self.premise_col])
+        hypothesis = str(row[self.hypothesis_col])
+        label = int(row[self.label_col])
+
+        # CRITICAL: Use paper-specified input format template
+        # From CLAUDE.md: "post: {post}, criterion: {criterion} Does the post match the criterion description? Output yes or no"
+        # This is the EXACT format required by the spec for MentalLLaMA NLI
+        formatted_input = (
+            f"post: {premise}, criterion: {hypothesis} "
+            f"Does the post match the criterion description? Output yes or no"
+        )
+
+        # Tokenize the formatted input as a single sequence
+        encoding = self.tokenizer(
+            formatted_input,
+            max_length=self.max_length,
+            padding='max_length',
+            truncation=True,
+            return_tensors='pt',
+        )
+
         return {
-            'sample_id': sample.sample_id,
-            'post_id': sample.post_id,
-            'criterion_id': sample.criterion_id,
-            'post': sample.post_text,
-            'criterion': sample.criterion_text,
-            'label': sample.label,
+            'input_ids': encoding['input_ids'].squeeze(0),
+            'attention_mask': encoding['attention_mask'].squeeze(0),
+            'labels': torch.tensor(label, dtype=torch.long),
         }
 
-    def get_groups(self) -> list[str]:
-        """Get post_ids for grouping in cross-validation"""
-        return [s.post_id for s in self.samples]
+
+def create_nli_dataloaders(
+    tokenizer: AutoTokenizer,
+    train_df: pd.DataFrame,
+    val_df: Optional[pd.DataFrame] = None,
+    batch_size: int = 8,
+    max_length: int = 512,
+    num_workers: int = 4,
+) -> Tuple[DataLoader, Optional[DataLoader]]:
+    """
+    Create train and validation dataloaders with hardware optimizations.
+
+    Args:
+        tokenizer: HuggingFace tokenizer
+        train_df: Training data DataFrame
+        val_df: Validation data DataFrame (optional)
+        batch_size: Batch size
+        max_length: Maximum sequence length
+        num_workers: Number of dataloader workers (default: 4 for faster I/O)
+
+    Returns:
+        (train_loader, val_loader) tuple
+
+    Note:
+        - pin_memory=True is enabled for faster GPU transfer
+        - num_workers=4 provides good I/O parallelism without overhead
+    """
+    train_dataset = MentalHealthNLIDataset(
+        train_df,
+        tokenizer,
+        max_length=max_length,
+    )
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True,
+    )
+
+    val_loader = None
+    if val_df is not None:
+        val_dataset = MentalHealthNLIDataset(
+            val_df,
+            tokenizer,
+            max_length=max_length,
+        )
+
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True,
+        )
+
+    return train_loader, val_loader
+
+
+# Example usage
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+
+    print("Testing ReDSM5 to NLI conversion...")
+
+    # Convert data
+    converter = ReDSM5toNLIConverter()
+    nli_df = converter.load_and_convert(include_negatives=True)
+
+    print(f"\nDataset statistics:")
+    print(f"Total examples: {len(nli_df)}")
+    print(f"Positive: {(nli_df['label'] == 1).sum()}")
+    print(f"Negative: {(nli_df['label'] == 0).sum()}")
+    print(f"\nClass distribution by symptom:")
+    print(nli_df.groupby(['symptom', 'label']).size().unstack(fill_value=0))
+
+    print("\nFirst example:")
+    print(nli_df.iloc[0])
+
+    # Test dataset
+    print("\n\nTesting dataset creation...")
+    from transformers import AutoTokenizer
+
+    # Note: For actual use, load MentalLLaMA tokenizer
+    # tokenizer = AutoTokenizer.from_pretrained("klyang/MentaLLaMA-chat-7B")
+    # For testing without downloading:
+    print("(Skipping tokenizer test - requires model download)")
+    print("✓ Data pipeline implementation complete")

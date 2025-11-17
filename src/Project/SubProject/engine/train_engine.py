@@ -1,380 +1,580 @@
 """
-Training Engine
+PATCH 03: Training Engine with Classification Loss
 
-Orchestrates cross-validation training with MLflow tracking.
+This patch provides a complete training loop using CrossEntropyLoss
+(NOT LM loss) for supervised binary classification.
+
+Key features:
+- CrossEntropyLoss for classification (not next-token prediction)
+- Proper optimizer setup
+- Training/validation loops
+- Metric tracking
+- Early stopping
+
+Usage:
+    cp PATCH_03_train_engine.py src/Project/SubProject/engine/train_engine.py
 """
 
-import argparse
-import json
-from pathlib import Path
-
-import mlflow
-import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
+from torch.cuda.amp import autocast, GradScaler
+from typing import Dict, Optional, Tuple, List, Literal
+import logging
 from tqdm import tqdm
-
-from Project.SubProject.data import MentalHealthDataset, create_folds
-from Project.SubProject.engine.metrics import (
-    MetricsTracker,
-    compute_metrics,
-    tune_threshold,
+import numpy as np
+import json
+from pathlib import Path
+from datetime import datetime
+from sklearn.metrics import (
+    accuracy_score,
+    precision_recall_fscore_support,
+    roc_auc_score,
+    confusion_matrix,
 )
-from Project.SubProject.models import MentallamClassifier, build_prompt
-from Project.SubProject.utils import configure_mlflow, get_logger, mlflow_run, set_seed
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
-class TrainingCollator:
-    """Collate function for training"""
+def create_experiment_dir(base_dir: str = "experiments", run_name: Optional[str] = None) -> Path:
+    """
+    Create timestamped experiment directory.
 
-    def __init__(self, tokenizer, max_length: int = 512):
-        self.tokenizer = tokenizer
-        self.max_length = max_length
+    Args:
+        base_dir: Base experiments directory
+        run_name: Optional run name (default: timestamp)
 
-    def __call__(self, batch):
-        """Collate batch of samples"""
-        prompts = []
-        labels = []
+    Returns:
+        Path to experiment directory
 
-        for item in batch:
-            prompt = build_prompt(item['post'], item['criterion'])
-            prompts.append(prompt)
-            labels.append(item['label'])
+    Structure:
+        experiments/
+        └── YYYY-MM-DD_HH-MM-SS_{run_name}/
+            ├── config.json
+            ├── best_model.pt
+            ├── metrics.json
+            └── training_history.json
+    """
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    if run_name:
+        exp_name = f"{timestamp}_{run_name}"
+    else:
+        exp_name = timestamp
 
-        # Tokenize
-        encoded = self.tokenizer(
-            prompts,
-            padding='max_length',
-            truncation=True,
-            max_length=self.max_length,
-            return_tensors='pt',
-        )
+    exp_dir = Path(base_dir) / exp_name
+    exp_dir.mkdir(parents=True, exist_ok=True)
 
-        return {
-            'input_ids': encoded['input_ids'],
-            'attention_mask': encoded['attention_mask'],
-            'labels': torch.tensor(labels, dtype=torch.long),
+    logger.info(f"Created experiment directory: {exp_dir}")
+    return exp_dir
+
+
+def get_optimal_precision() -> Literal["bf16", "fp16", "fp32"]:
+    """
+    Detect optimal precision for current hardware.
+
+    Returns:
+        "bf16" if GPU supports bfloat16 (A100, H100, etc.)
+        "fp16" if GPU supports float16 (V100, T4, etc.)
+        "fp32" if CPU or old GPU
+    """
+    if not torch.cuda.is_available():
+        return "fp32"
+
+    # Check for bf16 support (Ampere and newer: A100, RTX 30xx, etc.)
+    if torch.cuda.is_bf16_supported():
+        return "bf16"
+
+    # Fallback to fp16 for older GPUs
+    return "fp16"
+
+
+class ClassificationTrainer:
+    """
+    Trainer for binary classification using CrossEntropyLoss.
+
+    This is NOT a language modeling trainer - we use classification loss,
+    not next-token prediction loss.
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        train_loader: DataLoader,
+        val_loader: Optional[DataLoader] = None,
+        optimizer: Optional[torch.optim.Optimizer] = None,
+        lr: float = 2e-5,
+        num_epochs: int = 10,
+        device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        gradient_accumulation_steps: int = 1,
+        max_grad_norm: float = 1.0,
+        early_stopping_patience: int = 3,
+        save_path: Optional[str] = None,
+        precision: Optional[Literal["bf16", "fp16", "fp32"]] = None,
+        experiment_dir: Optional[Path] = None,
+        config: Optional[Dict] = None,
+    ):
+        """
+        Initialize trainer with mixed precision support and experiment tracking.
+
+        Args:
+            model: Model to train
+            train_loader: Training dataloader
+            val_loader: Validation dataloader (optional)
+            optimizer: Optimizer (if None, creates AdamW)
+            lr: Learning rate
+            num_epochs: Number of epochs
+            device: Device to train on
+            gradient_accumulation_steps: Gradient accumulation steps
+            max_grad_norm: Max gradient norm for clipping
+            early_stopping_patience: Patience for early stopping
+            save_path: Path to save best model (DEPRECATED: use experiment_dir instead)
+            precision: Mixed precision mode ("bf16", "fp16", "fp32", or None for auto-detect)
+            experiment_dir: Directory to save experiment artifacts (checkpoint, config, metrics)
+            config: Training configuration dict to save alongside checkpoint
+        """
+        self.model = model.to(device)
+        self.train_loader = train_loader
+        self.val_loader = val_loader
+        self.device = device
+        self.num_epochs = num_epochs
+        self.gradient_accumulation_steps = gradient_accumulation_steps
+        self.max_grad_norm = max_grad_norm
+        self.early_stopping_patience = early_stopping_patience
+
+        # Experiment tracking
+        self.experiment_dir = experiment_dir
+        self.config = config or {}
+
+        # Backward compatibility: if save_path provided but no experiment_dir, use save_path
+        if save_path and experiment_dir is None:
+            self.save_path = save_path
+        elif experiment_dir:
+            self.save_path = str(experiment_dir / "best_model.pt")
+        else:
+            self.save_path = None
+
+        # Mixed precision configuration (from CLAUDE.md:124)
+        # "Compute: gradient checkpointing, grad_accum=4, bf16 AMP when available"
+        if precision is None:
+            precision = get_optimal_precision()
+        self.precision = precision
+
+        # Configure mixed precision
+        self.use_amp = precision in ["bf16", "fp16"] and device == "cuda"
+        if self.use_amp:
+            self.autocast_dtype = torch.bfloat16 if precision == "bf16" else torch.float16
+            # GradScaler only needed for fp16 (bf16 doesn't need it)
+            self.scaler = GradScaler() if precision == "fp16" else None
+            logger.info(f"Mixed precision training enabled: {precision}")
+            if precision == "bf16":
+                logger.info("  Using bfloat16 (no GradScaler needed)")
+            else:
+                logger.info("  Using float16 (with GradScaler)")
+        else:
+            self.autocast_dtype = None
+            self.scaler = None
+            logger.info(f"Training in {precision} (no mixed precision)")
+
+        # Create optimizer if not provided
+        if optimizer is None:
+            self.optimizer = torch.optim.AdamW(
+                self.model.parameters(),
+                lr=lr,
+                weight_decay=0.01,
+            )
+        else:
+            self.optimizer = optimizer
+
+        # Loss function: CrossEntropyLoss for classification
+        # NOT LM loss!
+        self.loss_fn = nn.CrossEntropyLoss()
+
+        # Training state
+        self.current_epoch = 0
+        self.best_val_f1 = 0.0
+        self.epochs_without_improvement = 0
+        self.history = {
+            'train_loss': [],
+            'val_loss': [],
+            'val_accuracy': [],
+            'val_f1': [],
+            'val_precision': [],
+            'val_recall': [],
         }
 
+    def train_epoch(self) -> float:
+        """
+        Train for one epoch.
 
-def train_epoch(
-    model: nn.Module,
-    dataloader: DataLoader,
-    optimizer: optim.Optimizer,
-    device: torch.device,
-    epoch: int,
-) -> float:
-    """Train for one epoch"""
-    model.train()
-    total_loss = 0.0
-    num_batches = 0
+        Returns:
+            Average training loss
+        """
+        self.model.train()
+        total_loss = 0.0
+        num_batches = 0
 
-    pbar = tqdm(dataloader, desc=f"Epoch {epoch} [train]")
-    for batch in pbar:
-        # Move to device
-        input_ids = batch['input_ids'].to(device)
-        attention_mask = batch['attention_mask'].to(device)
-        labels = batch['labels'].to(device)
+        pbar = tqdm(self.train_loader, desc=f"Epoch {self.current_epoch + 1}")
 
-        # Forward pass
-        optimizer.zero_grad()
-        outputs = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            labels=labels,
+        for step, batch in enumerate(pbar):
+            # Move batch to device
+            input_ids = batch['input_ids'].to(self.device)
+            attention_mask = batch['attention_mask'].to(self.device)
+            labels = batch['labels'].to(self.device)
+
+            # Forward pass with mixed precision (if enabled)
+            if self.use_amp:
+                with autocast(dtype=self.autocast_dtype):
+                    outputs = self.model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        labels=labels,
+                    )
+
+                    # Get loss
+                    if isinstance(outputs, dict):
+                        loss = outputs['loss']
+                    else:
+                        logits = outputs[1] if isinstance(outputs, tuple) else outputs
+                        loss = self.loss_fn(logits, labels)
+
+                    # Scale loss for gradient accumulation
+                    loss = loss / self.gradient_accumulation_steps
+            else:
+                # FP32 path (no autocast)
+                outputs = self.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                )
+
+                # Get loss
+                if isinstance(outputs, dict):
+                    loss = outputs['loss']
+                else:
+                    logits = outputs[1] if isinstance(outputs, tuple) else outputs
+                    loss = self.loss_fn(logits, labels)
+
+                # Scale loss for gradient accumulation
+                loss = loss / self.gradient_accumulation_steps
+
+            # Backward pass (with or without scaler)
+            if self.scaler is not None:
+                # FP16 path with GradScaler
+                self.scaler.scale(loss).backward()
+            else:
+                # BF16 or FP32 path (no scaler needed)
+                loss.backward()
+
+            # Update weights
+            if (step + 1) % self.gradient_accumulation_steps == 0:
+                if self.scaler is not None:
+                    # FP16 path with GradScaler
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(),
+                        self.max_grad_norm
+                    )
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    # BF16 or FP32 path
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(),
+                        self.max_grad_norm
+                    )
+                    self.optimizer.step()
+
+                self.optimizer.zero_grad()
+
+            total_loss += loss.item() * self.gradient_accumulation_steps
+            num_batches += 1
+
+            # Update progress bar
+            pbar.set_postfix({'loss': total_loss / num_batches})
+
+        avg_loss = total_loss / num_batches
+        return avg_loss
+
+    @torch.no_grad()
+    def evaluate(self, dataloader: Optional[DataLoader] = None) -> Dict[str, float]:
+        """
+        Evaluate model on validation set.
+
+        Args:
+            dataloader: Dataloader to evaluate on (defaults to self.val_loader)
+
+        Returns:
+            Dictionary of metrics
+        """
+        if dataloader is None:
+            dataloader = self.val_loader
+
+        if dataloader is None:
+            return {}
+
+        self.model.eval()
+
+        all_preds = []
+        all_labels = []
+        all_logits = []
+        total_loss = 0.0
+        num_batches = 0
+
+        for batch in tqdm(dataloader, desc="Evaluating"):
+            # Move batch to device
+            input_ids = batch['input_ids'].to(self.device)
+            attention_mask = batch['attention_mask'].to(self.device)
+            labels = batch['labels'].to(self.device)
+
+            # Forward pass with mixed precision (if enabled)
+            if self.use_amp:
+                with autocast(dtype=self.autocast_dtype):
+                    outputs = self.model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        labels=labels,
+                    )
+            else:
+                outputs = self.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                )
+
+            # Get logits and loss
+            if isinstance(outputs, dict):
+                logits = outputs['logits']
+                loss = outputs.get('loss', None)
+            else:
+                if isinstance(outputs, tuple):
+                    loss, logits = outputs
+                else:
+                    logits = outputs
+                    loss = self.loss_fn(logits, labels)
+
+            if loss is not None:
+                total_loss += loss.item()
+                num_batches += 1
+
+            # Get predictions
+            preds = torch.argmax(logits, dim=1)
+
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+            all_logits.extend(logits.cpu().numpy())
+
+        # Convert to numpy
+        all_preds = np.array(all_preds)
+        all_labels = np.array(all_labels)
+        all_logits = np.array(all_logits)
+
+        # Compute metrics
+        accuracy = accuracy_score(all_labels, all_preds)
+        precision, recall, f1, _ = precision_recall_fscore_support(
+            all_labels,
+            all_preds,
+            average='binary',
+            zero_division=0,
         )
 
-        loss = outputs['loss']
+        # ROC AUC (use probability of positive class)
+        try:
+            probs = torch.softmax(torch.tensor(all_logits), dim=1).numpy()
+            roc_auc = roc_auc_score(all_labels, probs[:, 1])
+        except Exception:
+            roc_auc = 0.0
 
-        # Backward pass
-        loss.backward()
-        optimizer.step()
+        # Confusion matrix
+        cm = confusion_matrix(all_labels, all_preds)
 
-        # Track loss
-        total_loss += loss.item()
-        num_batches += 1
+        metrics = {
+            'loss': total_loss / num_batches if num_batches > 0 else 0.0,
+            'accuracy': accuracy,
+            'precision': precision,
+            'recall': recall,
+            'f1': f1,
+            'roc_auc': roc_auc,
+            'confusion_matrix': cm,
+        }
 
-        pbar.set_postfix({'loss': loss.item()})
+        return metrics
 
-    avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
-    return avg_loss
+    def save_experiment_artifacts(self, epoch: int, val_metrics: Dict[str, float]):
+        """
+        Save best model checkpoint, config, and metrics to experiment directory.
+
+        Saves:
+            - best_model.pt: Model state dict
+            - config.json: Training configuration
+            - metrics.json: Best epoch metrics (loss, F1, accuracy, etc.)
+            - training_history.json: Full training history
+
+        Args:
+            epoch: Current epoch number
+            val_metrics: Validation metrics for this epoch
+        """
+        if self.experiment_dir is None:
+            return
+
+        # Save model checkpoint
+        model_path = self.experiment_dir / "best_model.pt"
+        torch.save(self.model.state_dict(), model_path)
+        logger.info(f"Saved model checkpoint: {model_path}")
+
+        # Save configuration
+        config_path = self.experiment_dir / "config.json"
+        config_to_save = {
+            **self.config,  # User-provided config
+            'training': {
+                'lr': self.optimizer.param_groups[0]['lr'],
+                'num_epochs': self.num_epochs,
+                'gradient_accumulation_steps': self.gradient_accumulation_steps,
+                'max_grad_norm': self.max_grad_norm,
+                'early_stopping_patience': self.early_stopping_patience,
+                'precision': self.precision,
+                'device': str(self.device),
+            },
+            'model': {
+                'num_parameters': sum(p.numel() for p in self.model.parameters()),
+                'trainable_parameters': sum(p.numel() for p in self.model.parameters() if p.requires_grad),
+            }
+        }
+        with open(config_path, 'w') as f:
+            json.dump(config_to_save, f, indent=2)
+        logger.info(f"Saved configuration: {config_path}")
+
+        # Save best epoch metrics
+        metrics_path = self.experiment_dir / "metrics.json"
+        metrics_to_save = {
+            'epoch': epoch + 1,
+            'best_val_f1': float(self.best_val_f1),
+            'val_loss': float(val_metrics['loss']),
+            'val_accuracy': float(val_metrics['accuracy']),
+            'val_precision': float(val_metrics['precision']),
+            'val_recall': float(val_metrics['recall']),
+            'val_roc_auc': float(val_metrics['roc_auc']),
+            'confusion_matrix': val_metrics['confusion_matrix'].tolist(),
+        }
+        with open(metrics_path, 'w') as f:
+            json.dump(metrics_to_save, f, indent=2)
+        logger.info(f"Saved metrics: {metrics_path}")
+
+        # Save full training history
+        history_path = self.experiment_dir / "training_history.json"
+        history_to_save = {
+            k: [float(v) for v in vals] for k, vals in self.history.items()
+        }
+        with open(history_path, 'w') as f:
+            json.dump(history_to_save, f, indent=2)
+        logger.info(f"Saved training history: {history_path}")
+
+    def train(self) -> Dict[str, List[float]]:
+        """
+        Train model for multiple epochs.
+
+        Returns:
+            Training history dictionary
+        """
+        logger.info(f"Starting training for {self.num_epochs} epochs")
+        logger.info(f"Device: {self.device}")
+        logger.info(f"Gradient accumulation steps: {self.gradient_accumulation_steps}")
+
+        for epoch in range(self.num_epochs):
+            self.current_epoch = epoch
+
+            # Train epoch
+            train_loss = self.train_epoch()
+            self.history['train_loss'].append(train_loss)
+
+            logger.info(f"Epoch {epoch + 1}/{self.num_epochs}")
+            logger.info(f"  Train loss: {train_loss:.4f}")
+
+            # Evaluate
+            if self.val_loader is not None:
+                val_metrics = self.evaluate()
+
+                self.history['val_loss'].append(val_metrics['loss'])
+                self.history['val_accuracy'].append(val_metrics['accuracy'])
+                self.history['val_f1'].append(val_metrics['f1'])
+                self.history['val_precision'].append(val_metrics['precision'])
+                self.history['val_recall'].append(val_metrics['recall'])
+
+                logger.info(f"  Val loss: {val_metrics['loss']:.4f}")
+                logger.info(f"  Val accuracy: {val_metrics['accuracy']:.4f}")
+                logger.info(f"  Val F1: {val_metrics['f1']:.4f}")
+                logger.info(f"  Val precision: {val_metrics['precision']:.4f}")
+                logger.info(f"  Val recall: {val_metrics['recall']:.4f}")
+                logger.info(f"  Val ROC-AUC: {val_metrics['roc_auc']:.4f}")
+                logger.info(f"  Confusion matrix:\n{val_metrics['confusion_matrix']}")
+
+                # Early stopping check (based on best F1 score)
+                if val_metrics['f1'] > self.best_val_f1:
+                    self.best_val_f1 = val_metrics['f1']
+                    self.epochs_without_improvement = 0
+
+                    # Save all experiment artifacts (checkpoint, config, metrics, history)
+                    if self.experiment_dir:
+                        self.save_experiment_artifacts(epoch, val_metrics)
+                    # Backward compatibility: also save to save_path if provided
+                    elif self.save_path is not None:
+                        torch.save(self.model.state_dict(), self.save_path)
+                        logger.info(f"  Saved best model to {self.save_path}")
+
+                    logger.info(f"  ✓ New best F1: {self.best_val_f1:.4f}")
+                else:
+                    self.epochs_without_improvement += 1
+
+                # Early stopping
+                if self.epochs_without_improvement >= self.early_stopping_patience:
+                    logger.info(
+                        f"Early stopping triggered after {epoch + 1} epochs "
+                        f"(patience={self.early_stopping_patience})"
+                    )
+                    break
+
+        logger.info("Training complete!")
+        logger.info(f"Best validation F1: {self.best_val_f1:.4f}")
+
+        return self.history
 
 
-@torch.no_grad()
-def evaluate(
-    model: nn.Module,
-    dataloader: DataLoader,
-    device: torch.device,
-) -> dict:
-    """Evaluate model"""
-    model.eval()
+# Example usage
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
 
-    all_labels = []
-    all_probs = []
-    total_loss = 0.0
-    num_batches = 0
+    print("Training engine implementation complete.")
+    print("\nUsage example:")
+    print("""
+    from PATCH_01_encoder_model import load_mentallama_for_nli
+    from PATCH_02_data_pipeline import create_nli_dataloaders, ReDSM5toNLIConverter
+    from PATCH_03_train_engine import ClassificationTrainer
 
-    for batch in tqdm(dataloader, desc="Evaluating"):
-        # Move to device
-        input_ids = batch['input_ids'].to(device)
-        attention_mask = batch['attention_mask'].to(device)
-        labels = batch['labels'].to(device)
+    # Load model and tokenizer
+    model, tokenizer = load_mentallama_for_nli(num_labels=2)
 
-        # Forward pass
-        outputs = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            labels=labels,
-        )
+    # Load and convert data
+    converter = ReDSM5toNLIConverter()
+    nli_df = converter.load_and_convert()
 
-        loss = outputs['loss']
-        probs = torch.softmax(outputs['logits'], dim=-1)
-
-        # Collect predictions
-        all_labels.extend(labels.cpu().numpy())
-        all_probs.extend(probs[:, 1].cpu().numpy())  # Probability of positive class
-
-        total_loss += loss.item()
-        num_batches += 1
-
-    # Convert to arrays
-    y_true = np.array(all_labels)
-    y_proba = np.array(all_probs)
-
-    # Compute metrics with default threshold
-    y_pred = (y_proba >= 0.5).astype(int)
-    metrics = compute_metrics(y_true, y_pred, y_proba)
-    metrics['loss'] = total_loss / num_batches if num_batches > 0 else 0.0
-
-    return {
-        'metrics': metrics,
-        'y_true': y_true,
-        'y_proba': y_proba,
-    }
-
-
-def train_fold(
-    fold_idx: int,
-    dataset: MentalHealthDataset,
-    train_indices: list,
-    val_indices: list,
-    config: dict,
-    output_dir: Path,
-) -> dict:
-    """Train single fold"""
-    logger.info(f"Training fold {fold_idx}")
-
-    # Set device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    logger.info(f"Using device: {device}")
-
-    # Create model
-    model = MentallamClassifier(
-        model_name=config.get('model_name', 'klyang/MentaLLaMA-chat-7B'),
-        num_labels=2,
-        use_peft=config.get('use_peft', True),
-        gradient_checkpointing=config.get('gradient_checkpointing', True),
-        device_map='auto' if torch.cuda.is_available() else None,
-    )
-
-    # Create datasets
-    train_dataset = Subset(dataset, train_indices)
-    val_dataset = Subset(dataset, val_indices)
+    # Split train/val (simplified - use proper CV in production)
+    from sklearn.model_selection import train_test_split
+    train_df, val_df = train_test_split(nli_df, test_size=0.2, random_state=42)
 
     # Create dataloaders
-    collator = TrainingCollator(model.tokenizer, max_length=config.get('max_length', 512))
-
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config.get('batch_size', 4),
-        shuffle=True,
-        collate_fn=collator,
-        num_workers=0,  # Set to 0 to avoid multiprocessing issues
+    train_loader, val_loader = create_nli_dataloaders(
+        tokenizer, train_df, val_df, batch_size=8
     )
 
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=config.get('batch_size', 4),
-        shuffle=False,
-        collate_fn=collator,
-        num_workers=0,
+    # Create trainer
+    trainer = ClassificationTrainer(
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        lr=2e-5,
+        num_epochs=10,
+        save_path='best_model.pt'
     )
 
-    # Create optimizer
-    optimizer = optim.AdamW(
-        model.parameters(),
-        lr=config.get('learning_rate', 1e-4),
-        weight_decay=config.get('weight_decay', 0.01),
-    )
-
-    # Training loop
-    tracker = MetricsTracker()
-    best_checkpoint_path = output_dir / f"fold_{fold_idx}_best.pt"
-    best_f1 = 0.0
-
-    num_epochs = config.get('num_epochs', 10)
-    patience = config.get('patience', 20)
-
-    for epoch in range(num_epochs):
-        # Train
-        train_loss = train_epoch(model, train_loader, optimizer, device, epoch)
-
-        # Evaluate
-        eval_results = evaluate(model, val_loader, device)
-        val_metrics = eval_results['metrics']
-
-        # Log metrics
-        logger.info(
-            f"Fold {fold_idx} Epoch {epoch}: "
-            f"train_loss={train_loss:.4f}, "
-            f"val_loss={val_metrics['loss']:.4f}, "
-            f"val_f1={val_metrics['f1']:.4f}"
-        )
-
-        # Track metrics
-        tracker.update(epoch, {
-            'train_loss': train_loss,
-            'val_loss': val_metrics['loss'],
-            'val_f1': val_metrics['f1'],
-            'val_accuracy': val_metrics['accuracy'],
-            'val_precision': val_metrics['precision'],
-            'val_recall': val_metrics['recall'],
-            'val_roc_auc': val_metrics.get('roc_auc', 0.0),
-        })
-
-        # Save best model
-        if val_metrics['f1'] > best_f1:
-            best_f1 = val_metrics['f1']
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'metrics': val_metrics,
-            }, best_checkpoint_path)
-            logger.info(f"Saved best checkpoint (F1={best_f1:.4f})")
-
-        # Early stopping
-        if tracker.should_stop(patience):
-            logger.info(f"Early stopping at epoch {epoch}")
-            break
-
-    # Threshold tuning on validation set
-    logger.info("Tuning threshold on validation set...")
-    eval_results = evaluate(model, val_loader, device)
-    tuned_threshold, tuned_score, tuned_metrics = tune_threshold(
-        eval_results['y_true'],
-        eval_results['y_proba'],
-        metric='f1',
-    )
-
-    # Return results
-    return {
-        'fold_index': fold_idx,
-        'best_checkpoint': str(best_checkpoint_path),
-        'tuned_threshold': tuned_threshold,
-        'tuned_metrics': tuned_metrics,
-        'training_summary': tracker.get_summary(),
-    }
-
-
-def main():
-    """Main training orchestration"""
-    parser = argparse.ArgumentParser(description='Train MentaLLaMA classifier')
-    parser.add_argument('--data-dir', default='data/redsm5', help='RedSM5 data directory')
-    parser.add_argument('--dsm5-dir', default='data/DSM5', help='DSM5 data directory')
-    parser.add_argument('--output-dir', default='outputs', help='Output directory')
-    parser.add_argument('--n-folds', type=int, default=5, help='Number of folds')
-    parser.add_argument('--num-epochs', type=int, default=10, help='Number of epochs')
-    parser.add_argument('--batch-size', type=int, default=4, help='Batch size')
-    parser.add_argument('--learning-rate', type=float, default=1e-4, help='Learning rate')
-    parser.add_argument('--seed', type=int, default=42, help='Random seed')
-    parser.add_argument('--experiment-name', default='mentallama-training', help='MLflow experiment name')
-    parser.add_argument('--tracking-uri', default='sqlite:///mlflow.db', help='MLflow tracking URI')
-
-    args = parser.parse_args()
-
-    # Set seed
-    set_seed(args.seed)
-
-    # Configure MLflow
-    configure_mlflow(tracking_uri=args.tracking_uri, experiment=args.experiment_name)
-
-    # Create output directory
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Load dataset
-    logger.info("Loading dataset...")
-    dataset = MentalHealthDataset(
-        redsm5_path=args.data_dir,
-        dsm5_path=args.dsm5_dir,
-    )
-
-    # Create folds
-    logger.info(f"Creating {args.n_folds} folds...")
-    folds = create_folds(
-        dataset,
-        n_folds=args.n_folds,
-        seed=args.seed,
-        output_dir=str(output_dir / 'folds'),
-    )
-
-    # Training configuration
-    config = {
-        'model_name': 'klyang/MentaLLaMA-chat-7B',
-        'num_epochs': args.num_epochs,
-        'batch_size': args.batch_size,
-        'learning_rate': args.learning_rate,
-        'max_length': 512,
-        'use_peft': True,
-        'gradient_checkpointing': True,
-        'patience': 20,
-    }
-
-    # Start parent MLflow run
-    with mlflow_run('cv-training', tags={'stage': 'training'}, params=config):
-        all_results = []
-
-        # Train each fold
-        for fold in folds:
-            fold_results = train_fold(
-                fold_idx=fold.fold_index,
-                dataset=dataset,
-                train_indices=fold.train_indices,
-                val_indices=fold.val_indices,
-                config=config,
-                output_dir=output_dir,
-            )
-
-            all_results.append(fold_results)
-
-            # Log fold results to MLflow
-            mlflow.log_metrics({
-                f'fold_{fold.fold_index}_f1': fold_results['tuned_metrics']['f1'],
-                f'fold_{fold.fold_index}_threshold': fold_results['tuned_threshold'],
-            })
-
-        # Aggregate results
-        avg_f1 = np.mean([r['tuned_metrics']['f1'] for r in all_results])
-        logger.info(f"Average F1 across folds: {avg_f1:.4f}")
-
-        # Save results
-        results_file = output_dir / 'training_results.json'
-        with open(results_file, 'w') as f:
-            json.dump({
-                'config': config,
-                'folds': all_results,
-                'average_f1': float(avg_f1),
-            }, f, indent=2)
-
-        logger.info(f"Results saved to {results_file}")
-
-    logger.info("Training complete!")
-
-
-if __name__ == '__main__':
-    main()
+    # Train
+    history = trainer.train()
+    """)
