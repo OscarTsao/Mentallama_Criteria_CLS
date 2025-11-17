@@ -5,16 +5,13 @@ Loads and processes (post, criterion) pairs from RedSM5 annotations
 and DSM-5 criteria for binary classification.
 """
 
-import json
-import logging
 import hashlib
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass
+import json
 import uuid
+from dataclasses import dataclass
+from pathlib import Path
 
 import pandas as pd
-import torch
 from torch.utils.data import Dataset
 
 from Project.SubProject.utils.log import get_logger
@@ -106,7 +103,7 @@ class MentalHealthDataset(Dataset):
         # Log statistics
         self._log_statistics()
 
-    def _load_criteria(self) -> Dict[str, str]:
+    def _load_criteria(self) -> dict[str, str]:
         """Load DSM-5 criteria from JSON"""
         # Try both possible filenames (there's a typo in the actual file)
         possible_files = [
@@ -120,7 +117,7 @@ class MentalHealthDataset(Dataset):
         for filepath in possible_files:
             if filepath.exists():
                 if filepath.suffix == '.json':
-                    with open(filepath, 'r') as f:
+                    with open(filepath) as f:
                         data = json.load(f)
                         for criterion in data['criteria']:
                             criteria_dict[criterion['id']] = criterion['text']
@@ -138,7 +135,7 @@ class MentalHealthDataset(Dataset):
             f"Tried: {[f.name for f in possible_files]}"
         )
 
-    def _load_posts(self) -> Dict[str, str]:
+    def _load_posts(self) -> dict[str, str]:
         """Load posts from RedSM5 CSV"""
         posts_file = self.redsm5_path / "redsm5_posts.csv"
 
@@ -158,7 +155,7 @@ class MentalHealthDataset(Dataset):
         logger.info(f"Loaded {len(posts_dict)} posts from {posts_file}")
         return posts_dict
 
-    def _create_samples(self) -> List[Sample]:
+    def _create_samples(self) -> list[Sample]:
         """Create (post, criterion) pairs from annotations"""
         annotations_file = self.redsm5_path / "redsm5_annotations.csv"
 
@@ -290,7 +287,7 @@ class MentalHealthDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
-    def __getitem__(self, idx: int) -> Dict:
+    def __getitem__(self, idx: int) -> dict:
         """Get a sample by index"""
         sample = self.samples[idx]
         return {
@@ -302,6 +299,6 @@ class MentalHealthDataset(Dataset):
             'label': sample.label,
         }
 
-    def get_groups(self) -> List[str]:
+    def get_groups(self) -> list[str]:
         """Get post_ids for grouping in cross-validation"""
         return [s.post_id for s in self.samples]

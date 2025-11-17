@@ -5,10 +5,9 @@ Formats (post, criterion) pairs into prompts for binary classification.
 """
 
 import unicodedata
-from typing import Optional
 
 
-def build_prompt(post: str, criterion: str, max_length: Optional[int] = None) -> str:
+def build_prompt(post: str, criterion: str, max_length: int | None = None) -> str:
     """
     Build classification prompt
 

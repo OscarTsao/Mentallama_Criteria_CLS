@@ -1,9 +1,8 @@
 import logging
 import sys
-from typing import Optional
 
 
-def get_logger(name: Optional[str] = None, level: int | str = logging.INFO) -> logging.Logger:
+def get_logger(name: str | None = None, level: int | str = logging.INFO) -> logging.Logger:
     """Return a configured logger.
 
     - Adds a StreamHandler to stderr with a concise format.

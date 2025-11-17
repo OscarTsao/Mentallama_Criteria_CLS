@@ -7,26 +7,23 @@ Orchestrates cross-validation training with MLflow tracking.
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, Optional
-import sys
 
+import mlflow
+import numpy as np
 import torch
-from torch.utils.data import DataLoader, Subset
 import torch.nn as nn
 import torch.optim as optim
+from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
-import numpy as np
-import mlflow
 
 from Project.SubProject.data import MentalHealthDataset, create_folds
-from Project.SubProject.models import MentallamClassifier, build_prompt
 from Project.SubProject.engine.metrics import (
+    MetricsTracker,
     compute_metrics,
     tune_threshold,
-    MetricsTracker,
-    compute_confusion_matrix,
 )
-from Project.SubProject.utils import get_logger, set_seed, configure_mlflow, mlflow_run
+from Project.SubProject.models import MentallamClassifier, build_prompt
+from Project.SubProject.utils import configure_mlflow, get_logger, mlflow_run, set_seed
 
 logger = get_logger(__name__)
 
@@ -112,7 +109,7 @@ def evaluate(
     model: nn.Module,
     dataloader: DataLoader,
     device: torch.device,
-) -> Dict:
+) -> dict:
     """Evaluate model"""
     model.eval()
 
@@ -165,9 +162,9 @@ def train_fold(
     dataset: MentalHealthDataset,
     train_indices: list,
     val_indices: list,
-    config: Dict,
+    config: dict,
     output_dir: Path,
-) -> Dict:
+) -> dict:
     """Train single fold"""
     logger.info(f"Training fold {fold_idx}")
 

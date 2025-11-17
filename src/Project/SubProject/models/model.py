@@ -4,15 +4,12 @@ MentaLLaMA Model for Binary Classification
 Wrapper around LlamaForSequenceClassification with PEFT/DoRA support.
 """
 
-from typing import Optional, Dict, Any
+from typing import Any
+
 import torch
 import torch.nn as nn
-from transformers import (
-    AutoTokenizer,
-    LlamaForSequenceClassification,
-    PreTrainedModel,
-)
-from peft import LoraConfig, get_peft_model, TaskType, PeftModel
+from peft import LoraConfig, PeftModel, TaskType, get_peft_model
+from transformers import AutoTokenizer, LlamaForSequenceClassification
 
 from Project.SubProject.utils.log import get_logger
 
@@ -32,10 +29,10 @@ class MentallamClassifier(nn.Module):
         model_name: str = "klyang/MentaLLaMA-chat-7B",
         num_labels: int = 2,
         use_peft: bool = True,
-        peft_config: Optional[Dict[str, Any]] = None,
+        peft_config: dict[str, Any] | None = None,
         gradient_checkpointing: bool = True,
         load_in_8bit: bool = False,
-        device_map: Optional[str] = None,
+        device_map: str | None = None,
     ):
         """
         Args:
@@ -80,7 +77,7 @@ class MentallamClassifier(nn.Module):
 
         logger.info(f"Model loaded with {self.count_parameters():,} trainable parameters")
 
-    def _apply_peft(self, config: Dict[str, Any]):
+    def _apply_peft(self, config: dict[str, Any]):
         """Apply PEFT/DoRA configuration"""
         # Default DoRA config from spec
         default_config = {
@@ -109,9 +106,9 @@ class MentallamClassifier(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None,
-    ) -> Dict[str, torch.Tensor]:
+        attention_mask: torch.Tensor | None = None,
+        labels: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
         """
         Forward pass
 
@@ -145,7 +142,7 @@ class MentallamClassifier(nn.Module):
     def predict_proba(
         self,
         input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Get probability scores

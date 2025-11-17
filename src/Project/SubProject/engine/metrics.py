@@ -5,16 +5,16 @@ Provides evaluation metrics (accuracy, precision, recall, F1, ROC-AUC)
 and threshold optimization for binary classification.
 """
 
-from typing import Dict, List, Tuple, Optional
+
 import numpy as np
 from sklearn.metrics import (
     accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_recall_curve,
     precision_score,
     recall_score,
-    f1_score,
     roc_auc_score,
-    confusion_matrix,
-    precision_recall_curve,
     roc_curve,
 )
 
@@ -26,8 +26,8 @@ logger = get_logger(__name__)
 def compute_metrics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
-    y_proba: Optional[np.ndarray] = None,
-) -> Dict[str, float]:
+    y_proba: np.ndarray | None = None,
+) -> dict[str, float]:
     """
     Compute classification metrics
 
@@ -60,7 +60,7 @@ def compute_metrics(
 def compute_confusion_matrix(
     y_true: np.ndarray,
     y_pred: np.ndarray,
-) -> Dict[str, int]:
+) -> dict[str, int]:
     """
     Compute confusion matrix
 
@@ -85,8 +85,8 @@ def tune_threshold(
     y_true: np.ndarray,
     y_proba: np.ndarray,
     metric: str = 'f1',
-    thresholds: Optional[np.ndarray] = None,
-) -> Tuple[float, float, Dict[str, float]]:
+    thresholds: np.ndarray | None = None,
+) -> tuple[float, float, dict[str, float]]:
     """
     Find optimal classification threshold
 
@@ -131,7 +131,7 @@ def tune_threshold(
 def compute_pr_curve(
     y_true: np.ndarray,
     y_proba: np.ndarray,
-) -> Dict[str, np.ndarray]:
+) -> dict[str, np.ndarray]:
     """
     Compute precision-recall curve
 
@@ -154,7 +154,7 @@ def compute_pr_curve(
 def compute_roc_curve(
     y_true: np.ndarray,
     y_proba: np.ndarray,
-) -> Dict[str, np.ndarray]:
+) -> dict[str, np.ndarray]:
     """
     Compute ROC curve
 
@@ -177,8 +177,8 @@ def compute_roc_curve(
 def threshold_sweep_analysis(
     y_true: np.ndarray,
     y_proba: np.ndarray,
-    thresholds: Optional[np.ndarray] = None,
-) -> List[Dict]:
+    thresholds: np.ndarray | None = None,
+) -> list[dict]:
     """
     Perform comprehensive threshold sweep
 
@@ -228,7 +228,7 @@ class MetricsTracker:
         self.best_metrics = {}
         self.best_epoch = 0
 
-    def update(self, epoch: int, metrics: Dict[str, float]):
+    def update(self, epoch: int, metrics: dict[str, float]):
         """Update metrics for current epoch"""
         for key, value in metrics.items():
             if key in self.history:
@@ -240,7 +240,7 @@ class MetricsTracker:
                 self.best_metrics = metrics.copy()
                 self.best_epoch = epoch
 
-    def get_best(self) -> Tuple[int, Dict[str, float]]:
+    def get_best(self) -> tuple[int, dict[str, float]]:
         """Get best epoch and metrics"""
         return self.best_epoch, self.best_metrics
 
@@ -252,7 +252,7 @@ class MetricsTracker:
         current_epoch = len(self.history['val_f1']) - 1
         return (current_epoch - self.best_epoch) >= patience
 
-    def get_summary(self) -> Dict:
+    def get_summary(self) -> dict:
         """Get summary statistics"""
         summary = {
             'best_epoch': self.best_epoch,

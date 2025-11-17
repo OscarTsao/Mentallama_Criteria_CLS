@@ -6,10 +6,8 @@ between train and validation sets.
 """
 
 import json
-import hashlib
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Dict, Tuple
-from dataclasses import dataclass, asdict
 
 import numpy as np
 from sklearn.model_selection import StratifiedGroupKFold
@@ -23,15 +21,15 @@ logger = get_logger(__name__)
 class FoldAssignment:
     """Fold assignment metadata"""
     fold_index: int
-    train_indices: List[int]
-    val_indices: List[int]
-    train_groups: List[str]  # post_ids in train
-    val_groups: List[str]    # post_ids in val
+    train_indices: list[int]
+    val_indices: list[int]
+    train_groups: list[str]  # post_ids in train
+    val_groups: list[str]    # post_ids in val
     seed: int
     dataset_hash: str
-    label_distribution: Dict[str, int]
+    label_distribution: dict[str, int]
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization"""
         return {
             'fold_index': self.fold_index,
@@ -51,8 +49,8 @@ def create_folds(
     dataset,
     n_folds: int = 5,
     seed: int = 42,
-    output_dir: Optional[str] = None,
-) -> List[FoldAssignment]:
+    output_dir: str | None = None,
+) -> list[FoldAssignment]:
     """
     Create stratified group k-fold splits
 
@@ -139,7 +137,7 @@ def create_folds(
 
 def load_fold(fold_file: str) -> FoldAssignment:
     """Load fold assignment from JSON file"""
-    with open(fold_file, 'r') as f:
+    with open(fold_file) as f:
         data = json.load(f)
 
     return FoldAssignment(

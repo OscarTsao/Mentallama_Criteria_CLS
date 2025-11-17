@@ -7,10 +7,8 @@ Provides inference and evaluation capabilities.
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, List, Optional
 
 import torch
-import numpy as np
 
 from Project.SubProject.models import MentallamClassifier, build_prompt
 from Project.SubProject.utils import get_logger
@@ -24,7 +22,7 @@ class InferenceEngine:
     def __init__(
         self,
         checkpoint_path: str,
-        device: Optional[str] = None,
+        device: str | None = None,
     ):
         """
         Initialize inference engine
@@ -74,7 +72,7 @@ class InferenceEngine:
         post: str,
         criterion: str,
         threshold: float = 0.5,
-    ) -> Dict:
+    ) -> dict:
         """
         Make prediction for a single (post, criterion) pair
 
@@ -120,10 +118,10 @@ class InferenceEngine:
     @torch.no_grad()
     def predict_batch(
         self,
-        pairs: List[Dict[str, str]],
+        pairs: list[dict[str, str]],
         threshold: float = 0.5,
         batch_size: int = 8,
-    ) -> List[Dict]:
+    ) -> list[dict]:
         """
         Make predictions for multiple (post, criterion) pairs
 
@@ -215,7 +213,7 @@ def main():
         # Load input
         logger.info(f"Loading input from {args.input}")
         pairs = []
-        with open(args.input, 'r') as f:
+        with open(args.input) as f:
             for line in f:
                 pairs.append(json.loads(line))
 
