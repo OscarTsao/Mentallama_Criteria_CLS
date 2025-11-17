@@ -123,18 +123,30 @@ with mlflow_run("run-name", tags={"stage": "dev"}, params={"lr": 1e-4}):
 - Optimization: Select best by validation F1 with threshold tuning (0.00-1.00, step 0.01)
 - Compute: gradient checkpointing, grad_accum=4, bf16 AMP when available
 
-## Reproducibility
+## Reproducibility and Hardware Optimization
 
+**Seeding**:
 Use `set_seed()` from `utils.seed` for consistent results:
 - Default seed: 42
 - Supports environment variable override
-- Enables PyTorch deterministic algorithms when `deterministic=True`
+- `deterministic=True`: Enables deterministic algorithms (slower, reproducible)
+- `deterministic=False`: Enables cudnn.benchmark (faster, not reproducible)
 - Affects Python random, NumPy, and PyTorch RNG states
+
+**Hardware Optimizations**:
+Use `enable_tf32()` from `utils.seed` for faster training on Ampere+ GPUs:
+- Enables TF32 for matmul and cudnn operations (~2x speedup on A100/A6000)
+- Automatically called by training scripts
+- Combined with `deterministic=False` for maximum performance
+
+**DataLoader Optimizations**:
+- `pin_memory=True`: Faster GPU transfer
+- `num_workers=4`: Parallel data loading (default)
+- Increase num_workers (e.g., 8) for faster I/O on high-core systems
 
 ## Configuration Management
 
 - `pyproject.toml`: Python package configuration, dependencies, tool settings
-- `configs/`: Intended for Hydra configuration files (currently placeholder)
 - `.devcontainer/`: VS Code devcontainer setup with Python extensions (Pylance, Ruff, Jupyter)
 
 ## Important Conventions
