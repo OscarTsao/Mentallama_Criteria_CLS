@@ -156,7 +156,13 @@ class MentalHealthDataset(Dataset):
         return posts_dict
 
     def _create_samples(self) -> list[Sample]:
-        """Create (post, criterion) pairs from annotations"""
+        """
+        Create ALL (post, criterion) pairs (Cartesian product).
+
+        Labels:
+        - label=1: pairs where annotation has status=1
+        - label=0: all other pairs (status=0 OR not in annotations)
+        """
         annotations_file = self.redsm5_path / "redsm5_annotations.csv"
 
         if not annotations_file.exists():
@@ -169,54 +175,74 @@ class MentalHealthDataset(Dataset):
             else:
                 raise FileNotFoundError(f"Annotations file not found in {self.redsm5_path}")
 
+        # Load annotations and build positive label set
         df = pd.read_csv(annotations_file)
 
-        samples = []
-        skipped = 0
+        positive_pairs = set()
+        negative_pairs = set()
+        skipped_annotations = 0
 
         for _, row in df.iterrows():
             post_id = row['post_id']
             symptom = row['DSM5_symptom']
-            label = int(row['status'])
+            status = int(row['status'])
 
             # Map symptom to criterion ID
             criterion_id = SYMPTOM_TO_CRITERION.get(symptom)
             if criterion_id is None:
-                logger.warning(f"Unknown symptom '{symptom}', skipping")
-                skipped += 1
+                logger.warning(f"Unknown symptom '{symptom}', skipping annotation")
+                skipped_annotations += 1
                 continue
 
-            # Get post text
-            post_text = self.posts.get(post_id)
-            if post_text is None:
-                logger.warning(f"Post {post_id} not found, skipping")
-                skipped += 1
+            # Verify post exists
+            if post_id not in self.posts:
+                logger.warning(f"Post {post_id} in annotations not found in posts, skipping")
+                skipped_annotations += 1
                 continue
 
-            # Get criterion text
-            criterion_text = self.criteria.get(criterion_id)
-            if criterion_text is None:
-                logger.warning(f"Criterion {criterion_id} not found, skipping")
-                skipped += 1
-                continue
+            # Track positive and explicit negative pairs
+            pair = (post_id, criterion_id)
+            if status == 1:
+                positive_pairs.add(pair)
+            elif status == 0:
+                negative_pairs.add(pair)
 
-            # Create sample
-            try:
-                sample = Sample(
-                    sample_id=str(uuid.uuid4()),
-                    post_id=post_id,
-                    criterion_id=criterion_id,
-                    post_text=post_text,
-                    criterion_text=criterion_text,
-                    label=label,
-                )
-                samples.append(sample)
-            except ValueError as e:
-                logger.warning(f"Invalid sample: {e}, skipping")
-                skipped += 1
-                continue
+        logger.info(
+            f"Loaded {len(positive_pairs)} positive annotations, "
+            f"{len(negative_pairs)} explicit negative annotations, "
+            f"skipped {skipped_annotations}"
+        )
 
-        logger.info(f"Created {len(samples)} samples, skipped {skipped}")
+        # Create ALL possible (post, criterion) pairs
+        samples = []
+        skipped_samples = 0
+
+        for post_id, post_text in self.posts.items():
+            for criterion_id, criterion_text in self.criteria.items():
+                # Determine label: 1 if in positive_pairs, 0 otherwise
+                label = 1 if (post_id, criterion_id) in positive_pairs else 0
+
+                # Create sample
+                try:
+                    sample = Sample(
+                        sample_id=str(uuid.uuid4()),
+                        post_id=post_id,
+                        criterion_id=criterion_id,
+                        post_text=post_text,
+                        criterion_text=criterion_text,
+                        label=label,
+                    )
+                    samples.append(sample)
+                except ValueError as e:
+                    logger.warning(f"Invalid sample for {post_id}, {criterion_id}: {e}")
+                    skipped_samples += 1
+                    continue
+
+        logger.info(
+            f"Created {len(samples)} total samples "
+            f"({len(self.posts)} posts × {len(self.criteria)} criteria), "
+            f"skipped {skipped_samples}"
+        )
         return samples
 
     def _validate_cardinality(self):
@@ -225,20 +251,39 @@ class MentalHealthDataset(Dataset):
             logger.warning("Count validation overridden")
             return
 
-        # Expected counts from spec (may need adjustment based on actual data)
-        # expected_posts = 1484
-        # expected_criteria = 9
-        # expected_samples = 13356
+        # With Cartesian product: all posts × all criteria
+        unique_posts = len(self.posts)
+        unique_criteria = len(self.criteria)
+        expected_samples = unique_posts * unique_criteria
 
-        # For now, just log actual counts
-        unique_posts = len(set(s.post_id for s in self.samples))
-        unique_criteria = len(set(s.criterion_id for s in self.samples))
+        actual_samples = len(self.samples)
+        actual_unique_posts = len(set(s.post_id for s in self.samples))
+        actual_unique_criteria = len(set(s.criterion_id for s in self.samples))
 
         logger.info(
-            f"Cardinality: {unique_posts} unique posts, "
-            f"{unique_criteria} unique criteria, "
-            f"{len(self.samples)} total samples"
+            f"Cardinality: {actual_unique_posts}/{unique_posts} unique posts, "
+            f"{actual_unique_criteria}/{unique_criteria} unique criteria, "
+            f"{actual_samples}/{expected_samples} total samples"
         )
+
+        # Validate we have complete Cartesian product
+        if actual_samples != expected_samples:
+            logger.warning(
+                f"Expected {expected_samples} samples (posts × criteria), "
+                f"but got {actual_samples}"
+            )
+
+        if actual_unique_posts != unique_posts:
+            logger.warning(
+                f"Not all posts represented in samples: "
+                f"{actual_unique_posts}/{unique_posts}"
+            )
+
+        if actual_unique_criteria != unique_criteria:
+            logger.warning(
+                f"Not all criteria represented in samples: "
+                f"{actual_unique_criteria}/{unique_criteria}"
+            )
 
     def _log_statistics(self):
         """Log dataset statistics"""
