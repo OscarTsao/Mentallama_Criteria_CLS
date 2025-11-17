@@ -284,8 +284,69 @@ python scripts/train_5fold_cv.py --fold 0 --batch-size 8 --epochs 100
 **Key Features**:
 - ✅ **StratifiedGroupKFold**: Grouped by `post_id` (prevents data leakage)
 - ✅ **Stratified**: Maintains class balance across folds
-- ✅ **Per-fold results**: Saved to `cv_results/fold_N/`
+- ✅ **Timestamped experiments**: Each run saved to `experiments/YYYY-MM-DD_HH-MM-SS_*/`
+- ✅ **Complete tracking**: Checkpoint + config + metrics + history saved automatically
 - ✅ **Aggregated metrics**: Mean ± std F1 and accuracy
+
+### Experiment Tracking
+
+All training runs automatically save complete experiment artifacts with timestamps:
+
+**Directory Structure**:
+```
+experiments/
+└── 2025-01-17_14-30-45_fold_0/
+    ├── best_model.pt           # Model checkpoint (selected by best F1)
+    ├── config.json             # Complete training configuration
+    ├── metrics.json            # Best epoch metrics (F1, accuracy, loss, etc.)
+    └── training_history.json   # Full training history (all epochs)
+```
+
+**What Gets Saved**:
+- ✅ **Model checkpoint**: Saved when validation F1 improves (best model by F1 score)
+- ✅ **Configuration**: Model params, data stats, hyperparameters, device info
+- ✅ **Best metrics**: F1, accuracy, precision, recall, ROC-AUC, confusion matrix
+- ✅ **Training history**: Loss and metrics for every epoch
+
+**Example Experiment Directory**:
+```bash
+# 5-fold CV creates 5 timestamped directories
+experiments/
+├── 2025-01-17_14-30-45_fold_0/
+├── 2025-01-17_15-45-30_fold_1/
+├── 2025-01-17_17-00-15_fold_2/
+├── 2025-01-17_18-15-00_fold_3/
+└── 2025-01-17_19-30-45_fold_4/
+
+# Each contains complete artifacts
+experiments/2025-01-17_14-30-45_fold_0/
+├── best_model.pt              # 13.5 GB (full model)
+├── config.json                # Training configuration
+├── metrics.json               # Best epoch: F1=0.82, Acc=0.85, etc.
+└── training_history.json      # 47 epochs of training data
+```
+
+**Loading Saved Models**:
+```python
+from Project.SubProject.models.model import load_mentallama_for_nli
+import torch
+import json
+
+# Load model architecture
+model, tokenizer = load_mentallama_for_nli(num_labels=2)
+
+# Load best checkpoint
+experiment_dir = "experiments/2025-01-17_14-30-45_fold_0"
+model.load_state_dict(torch.load(f"{experiment_dir}/best_model.pt"))
+
+# Load configuration and metrics
+with open(f"{experiment_dir}/config.json") as f:
+    config = json.load(f)
+
+with open(f"{experiment_dir}/metrics.json") as f:
+    metrics = json.load(f)
+    print(f"Best F1: {metrics['best_val_f1']:.4f}")
+```
 
 ### Full Training Script (Programmatic)
 

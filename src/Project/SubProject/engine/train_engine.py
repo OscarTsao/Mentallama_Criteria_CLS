@@ -23,6 +23,9 @@ from typing import Dict, Optional, Tuple, List, Literal
 import logging
 from tqdm import tqdm
 import numpy as np
+import json
+from pathlib import Path
+from datetime import datetime
 from sklearn.metrics import (
     accuracy_score,
     precision_recall_fscore_support,
@@ -31,6 +34,38 @@ from sklearn.metrics import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def create_experiment_dir(base_dir: str = "experiments", run_name: Optional[str] = None) -> Path:
+    """
+    Create timestamped experiment directory.
+
+    Args:
+        base_dir: Base experiments directory
+        run_name: Optional run name (default: timestamp)
+
+    Returns:
+        Path to experiment directory
+
+    Structure:
+        experiments/
+        └── YYYY-MM-DD_HH-MM-SS_{run_name}/
+            ├── config.json
+            ├── best_model.pt
+            ├── metrics.json
+            └── training_history.json
+    """
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    if run_name:
+        exp_name = f"{timestamp}_{run_name}"
+    else:
+        exp_name = timestamp
+
+    exp_dir = Path(base_dir) / exp_name
+    exp_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info(f"Created experiment directory: {exp_dir}")
+    return exp_dir
 
 
 def get_optimal_precision() -> Literal["bf16", "fp16", "fp32"]:
@@ -75,9 +110,11 @@ class ClassificationTrainer:
         early_stopping_patience: int = 3,
         save_path: Optional[str] = None,
         precision: Optional[Literal["bf16", "fp16", "fp32"]] = None,
+        experiment_dir: Optional[Path] = None,
+        config: Optional[Dict] = None,
     ):
         """
-        Initialize trainer with mixed precision support.
+        Initialize trainer with mixed precision support and experiment tracking.
 
         Args:
             model: Model to train
@@ -90,8 +127,10 @@ class ClassificationTrainer:
             gradient_accumulation_steps: Gradient accumulation steps
             max_grad_norm: Max gradient norm for clipping
             early_stopping_patience: Patience for early stopping
-            save_path: Path to save best model
+            save_path: Path to save best model (DEPRECATED: use experiment_dir instead)
             precision: Mixed precision mode ("bf16", "fp16", "fp32", or None for auto-detect)
+            experiment_dir: Directory to save experiment artifacts (checkpoint, config, metrics)
+            config: Training configuration dict to save alongside checkpoint
         """
         self.model = model.to(device)
         self.train_loader = train_loader
@@ -101,7 +140,18 @@ class ClassificationTrainer:
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.max_grad_norm = max_grad_norm
         self.early_stopping_patience = early_stopping_patience
-        self.save_path = save_path
+
+        # Experiment tracking
+        self.experiment_dir = experiment_dir
+        self.config = config or {}
+
+        # Backward compatibility: if save_path provided but no experiment_dir, use save_path
+        if save_path and experiment_dir is None:
+            self.save_path = save_path
+        elif experiment_dir:
+            self.save_path = str(experiment_dir / "best_model.pt")
+        else:
+            self.save_path = None
 
         # Mixed precision configuration (from CLAUDE.md:124)
         # "Compute: gradient checkpointing, grad_accum=4, bf16 AMP when available"
@@ -349,6 +399,75 @@ class ClassificationTrainer:
 
         return metrics
 
+    def save_experiment_artifacts(self, epoch: int, val_metrics: Dict[str, float]):
+        """
+        Save best model checkpoint, config, and metrics to experiment directory.
+
+        Saves:
+            - best_model.pt: Model state dict
+            - config.json: Training configuration
+            - metrics.json: Best epoch metrics (loss, F1, accuracy, etc.)
+            - training_history.json: Full training history
+
+        Args:
+            epoch: Current epoch number
+            val_metrics: Validation metrics for this epoch
+        """
+        if self.experiment_dir is None:
+            return
+
+        # Save model checkpoint
+        model_path = self.experiment_dir / "best_model.pt"
+        torch.save(self.model.state_dict(), model_path)
+        logger.info(f"Saved model checkpoint: {model_path}")
+
+        # Save configuration
+        config_path = self.experiment_dir / "config.json"
+        config_to_save = {
+            **self.config,  # User-provided config
+            'training': {
+                'lr': self.optimizer.param_groups[0]['lr'],
+                'num_epochs': self.num_epochs,
+                'gradient_accumulation_steps': self.gradient_accumulation_steps,
+                'max_grad_norm': self.max_grad_norm,
+                'early_stopping_patience': self.early_stopping_patience,
+                'precision': self.precision,
+                'device': str(self.device),
+            },
+            'model': {
+                'num_parameters': sum(p.numel() for p in self.model.parameters()),
+                'trainable_parameters': sum(p.numel() for p in self.model.parameters() if p.requires_grad),
+            }
+        }
+        with open(config_path, 'w') as f:
+            json.dump(config_to_save, f, indent=2)
+        logger.info(f"Saved configuration: {config_path}")
+
+        # Save best epoch metrics
+        metrics_path = self.experiment_dir / "metrics.json"
+        metrics_to_save = {
+            'epoch': epoch + 1,
+            'best_val_f1': float(self.best_val_f1),
+            'val_loss': float(val_metrics['loss']),
+            'val_accuracy': float(val_metrics['accuracy']),
+            'val_precision': float(val_metrics['precision']),
+            'val_recall': float(val_metrics['recall']),
+            'val_roc_auc': float(val_metrics['roc_auc']),
+            'confusion_matrix': val_metrics['confusion_matrix'].tolist(),
+        }
+        with open(metrics_path, 'w') as f:
+            json.dump(metrics_to_save, f, indent=2)
+        logger.info(f"Saved metrics: {metrics_path}")
+
+        # Save full training history
+        history_path = self.experiment_dir / "training_history.json"
+        history_to_save = {
+            k: [float(v) for v in vals] for k, vals in self.history.items()
+        }
+        with open(history_path, 'w') as f:
+            json.dump(history_to_save, f, indent=2)
+        logger.info(f"Saved training history: {history_path}")
+
     def train(self) -> Dict[str, List[float]]:
         """
         Train model for multiple epochs.
@@ -388,15 +507,20 @@ class ClassificationTrainer:
                 logger.info(f"  Val ROC-AUC: {val_metrics['roc_auc']:.4f}")
                 logger.info(f"  Confusion matrix:\n{val_metrics['confusion_matrix']}")
 
-                # Early stopping check
+                # Early stopping check (based on best F1 score)
                 if val_metrics['f1'] > self.best_val_f1:
                     self.best_val_f1 = val_metrics['f1']
                     self.epochs_without_improvement = 0
 
-                    # Save best model
-                    if self.save_path is not None:
+                    # Save all experiment artifacts (checkpoint, config, metrics, history)
+                    if self.experiment_dir:
+                        self.save_experiment_artifacts(epoch, val_metrics)
+                    # Backward compatibility: also save to save_path if provided
+                    elif self.save_path is not None:
                         torch.save(self.model.state_dict(), self.save_path)
                         logger.info(f"  Saved best model to {self.save_path}")
+
+                    logger.info(f"  ✓ New best F1: {self.best_val_f1:.4f}")
                 else:
                     self.epochs_without_improvement += 1
 

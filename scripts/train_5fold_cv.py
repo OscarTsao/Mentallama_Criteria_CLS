@@ -29,7 +29,7 @@ from Project.SubProject.data.dataset import (
     ReDSM5toNLIConverter,
     create_nli_dataloaders
 )
-from Project.SubProject.engine.train_engine import ClassificationTrainer
+from Project.SubProject.engine.train_engine import ClassificationTrainer, create_experiment_dir
 from Project.SubProject.utils.seed import set_seed
 from Project.SubProject.utils.terminal_viz import TrainingVisualizer, print_model_info
 from sklearn.model_selection import StratifiedGroupKFold
@@ -236,12 +236,37 @@ def train_single_fold(
     )
     viz.display_success(f"{len(train_loader)} train batches, {len(val_loader)} val batches")
 
-    # Create output directory for this fold
-    fold_output_dir = Path(args.output_dir) / f"fold_{fold_idx}"
-    fold_output_dir.mkdir(parents=True, exist_ok=True)
-    save_path = str(fold_output_dir / "best_model.pt")
+    # Create timestamped experiment directory for this fold
+    experiment_dir = create_experiment_dir(
+        base_dir=args.output_dir,
+        run_name=f"fold_{fold_idx}"
+    )
 
-    # Create trainer
+    # Prepare configuration to save
+    config = {
+        'model': {
+            'name': args.model_name,
+            'num_labels': args.num_labels,
+        },
+        'data': {
+            'max_length': args.max_length,
+            'batch_size': args.batch_size,
+            'train_size': len(train_df),
+            'val_size': len(val_df),
+            'train_positive': int((train_df['label'] == 1).sum()),
+            'val_positive': int((val_df['label'] == 1).sum()),
+        },
+        'cross_validation': {
+            'n_folds': args.n_folds,
+            'fold_index': fold_idx,
+            'seed': args.seed,
+        },
+        'experiment': {
+            'output_dir': str(experiment_dir),
+        }
+    }
+
+    # Create trainer with experiment tracking
     viz.display_info("Creating trainer...")
     trainer = ClassificationTrainer(
         model=model,
@@ -252,29 +277,21 @@ def train_single_fold(
         device=args.device,
         gradient_accumulation_steps=args.grad_accum,
         early_stopping_patience=args.patience,
-        save_path=save_path,
         precision=args.precision,
+        experiment_dir=experiment_dir,  # New: experiment tracking
+        config=config,  # New: save configuration
     )
     viz.display_success("Trainer initialized")
 
-    # Train
+    # Train (artifacts auto-saved to experiment_dir on best F1)
     print()  # Spacing
     history = trainer.train()
-
-    # Save training history
-    history_path = fold_output_dir / "training_history.json"
-    with open(history_path, 'w') as f:
-        # Convert numpy types to Python types for JSON serialization
-        history_serializable = {
-            k: [float(v) for v in vals] for k, vals in history.items()
-        }
-        json.dump(history_serializable, f, indent=2)
 
     # Display results
     viz.display_training_complete(
         best_f1=trainer.best_val_f1,
         total_epochs=len(history['train_loss']),
-        save_path=save_path
+        save_path=str(experiment_dir / "best_model.pt")
     )
 
     # Return fold results
@@ -285,6 +302,7 @@ def train_single_fold(
         'best_val_loss': min(history['val_loss']),
         'final_train_loss': history['train_loss'][-1],
         'total_epochs': len(history['train_loss']),
+        'experiment_dir': str(experiment_dir),  # New: include experiment directory
         'history': history,
     }
 

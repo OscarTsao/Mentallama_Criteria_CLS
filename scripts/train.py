@@ -21,7 +21,7 @@ from Project.SubProject.data.dataset import (
     ReDSM5toNLIConverter,
     create_nli_dataloaders
 )
-from Project.SubProject.engine.train_engine import ClassificationTrainer
+from Project.SubProject.engine.train_engine import ClassificationTrainer, create_experiment_dir
 from Project.SubProject.utils.seed import set_seed
 from Project.SubProject.utils.terminal_viz import TrainingVisualizer, print_model_info
 from sklearn.model_selection import train_test_split
@@ -212,6 +212,33 @@ def main():
     )
     viz.display_success(f"Dataloaders created: {len(train_loader)} train batches, {len(val_loader)} val batches")
 
+    # Create timestamped experiment directory
+    experiment_dir = create_experiment_dir(
+        base_dir="experiments",
+        run_name="single_split"
+    )
+
+    # Prepare configuration to save
+    config = {
+        'model': {
+            'name': args.model_name,
+            'num_labels': args.num_labels,
+        },
+        'data': {
+            'max_length': args.max_length,
+            'batch_size': args.batch_size,
+            'train_size': len(train_df),
+            'val_size': len(val_df),
+            'train_positive': int((train_df['label'] == 1).sum()),
+            'val_positive': int((val_df['label'] == 1).sum()),
+            'test_size': args.test_size,
+            'seed': args.seed,
+        },
+        'experiment': {
+            'output_dir': str(experiment_dir),
+        }
+    }
+
     # Display training configuration
     training_config = {
         'Learning Rate': args.lr,
@@ -223,11 +250,11 @@ def main():
         'Device': args.device,
         'Precision': args.precision if args.precision else 'auto-detect',
         'Max Sequence Length': args.max_length,
-        'Save Path': args.save_path,
+        'Experiment Dir': str(experiment_dir),
     }
     viz.display_config(training_config)
 
-    # Create trainer
+    # Create trainer with experiment tracking
     viz.display_info("Creating trainer...")
     trainer = ClassificationTrainer(
         model=model,
@@ -238,8 +265,9 @@ def main():
         device=args.device,
         gradient_accumulation_steps=args.grad_accum,
         early_stopping_patience=args.patience,
-        save_path=args.save_path,
         precision=args.precision,
+        experiment_dir=experiment_dir,  # New: experiment tracking
+        config=config,  # New: save configuration
     )
     viz.display_success("Trainer initialized")
 
@@ -255,7 +283,7 @@ def main():
     viz.display_training_complete(
         best_f1=trainer.best_val_f1,
         total_epochs=len(history['train_loss']),
-        save_path=args.save_path
+        save_path=str(experiment_dir / "best_model.pt")
     )
 
     # Display final metrics
