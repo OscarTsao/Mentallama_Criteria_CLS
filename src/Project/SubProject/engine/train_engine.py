@@ -5,6 +5,7 @@ Orchestrates cross-validation training with MLflow tracking.
 """
 
 import argparse
+import contextlib
 import json
 from pathlib import Path
 
@@ -67,38 +68,75 @@ def train_epoch(
     optimizer: optim.Optimizer,
     device: torch.device,
     epoch: int,
+    grad_clip: float | None = None,
+    scaler: torch.cuda.amp.GradScaler | None = None,
+    amp_dtype: torch.dtype = torch.float16,
+    grad_accum_steps: int = 1,
 ) -> float:
-    """Train for one epoch"""
+    """Train for one epoch with gradient accumulation support"""
     model.train()
     total_loss = 0.0
     num_batches = 0
 
     pbar = tqdm(dataloader, desc=f"Epoch {epoch} [train]")
-    for batch in pbar:
+    unscale_supported = True
+    optimizer.zero_grad()  # Zero gradients at start
+
+    for batch_idx, batch in enumerate(pbar):
         # Move to device
         input_ids = batch['input_ids'].to(device)
         attention_mask = batch['attention_mask'].to(device)
         labels = batch['labels'].to(device)
 
         # Forward pass
-        optimizer.zero_grad()
-        outputs = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            labels=labels,
+        use_amp = (
+            device.type == 'cuda'
+            and scaler is not None
+            and scaler.is_enabled()
         )
+        if use_amp:
+            autocast_ctx = torch.cuda.amp.autocast(dtype=amp_dtype)
+        else:
+            autocast_ctx = contextlib.nullcontext()
 
-        loss = outputs['loss']
+        with autocast_ctx:
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels,
+            )
+            loss = outputs['loss'] / grad_accum_steps  # Scale loss for accumulation
 
         # Backward pass
-        loss.backward()
-        optimizer.step()
+        if use_amp:
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
 
-        # Track loss
-        total_loss += loss.item()
+        # Update weights every grad_accum_steps
+        if (batch_idx + 1) % grad_accum_steps == 0 or (batch_idx + 1) == len(dataloader):
+            if use_amp:
+                if grad_clip is not None and unscale_supported:
+                    try:
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                    except ValueError:
+                        logger.warning("GradScaler could not unscale FP16 gradients; skipping gradient clipping for this run.")
+                        unscale_supported = False
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                if grad_clip is not None:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                optimizer.step()
+
+            optimizer.zero_grad()
+
+        # Track loss (unscaled)
+        total_loss += loss.item() * grad_accum_steps
         num_batches += 1
 
-        pbar.set_postfix({'loss': loss.item()})
+        pbar.set_postfix({'loss': loss.item() * grad_accum_steps})
 
     avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
     return avg_loss
@@ -210,6 +248,13 @@ def train_fold(
         lr=config.get('learning_rate', 1e-4),
         weight_decay=config.get('weight_decay', 0.01),
     )
+    use_amp = config.get('amp_enabled', True) and device.type == 'cuda'
+    amp_dtype_str = config.get('amp_dtype', 'float16')
+    amp_dtype = {
+        'float16': torch.float16,
+        'bfloat16': torch.bfloat16,
+    }.get(amp_dtype_str, torch.float16)
+    scaler = torch.cuda.amp.GradScaler(enabled=True) if use_amp else None
 
     # Training loop
     tracker = MetricsTracker()
@@ -221,7 +266,17 @@ def train_fold(
 
     for epoch in range(num_epochs):
         # Train
-        train_loss = train_epoch(model, train_loader, optimizer, device, epoch)
+        train_loss = train_epoch(
+            model,
+            train_loader,
+            optimizer,
+            device,
+            epoch,
+            grad_clip=config.get('grad_clip_norm'),
+            scaler=scaler if use_amp else None,
+            amp_dtype=amp_dtype,
+            grad_accum_steps=config.get('grad_accum', 1),
+        )
 
         # Evaluate
         eval_results = evaluate(model, val_loader, device)
@@ -290,7 +345,11 @@ def main():
     parser.add_argument('--n-folds', type=int, default=5, help='Number of folds')
     parser.add_argument('--num-epochs', type=int, default=10, help='Number of epochs')
     parser.add_argument('--batch-size', type=int, default=4, help='Batch size')
+    parser.add_argument('--grad-accum', type=int, default=1, help='Gradient accumulation steps')
     parser.add_argument('--learning-rate', type=float, default=1e-4, help='Learning rate')
+    parser.add_argument('--amp-enabled', action='store_true', default=True, help='Enable automatic mixed precision')
+    parser.add_argument('--no-amp', dest='amp_enabled', action='store_false', help='Disable automatic mixed precision')
+    parser.add_argument('--amp-dtype', choices=['float16', 'bfloat16'], default='bfloat16', help='AMP dtype (bfloat16 recommended for Ampere+ GPUs)')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--experiment-name', default='mentallama-training', help='MLflow experiment name')
     parser.add_argument('--tracking-uri', default='sqlite:///mlflow.db', help='MLflow tracking URI')
@@ -328,11 +387,15 @@ def main():
         'model_name': 'klyang/MentaLLaMA-chat-7B',
         'num_epochs': args.num_epochs,
         'batch_size': args.batch_size,
+        'grad_accum': args.grad_accum,
         'learning_rate': args.learning_rate,
         'max_length': 512,
         'use_peft': True,
         'gradient_checkpointing': True,
         'patience': 20,
+        'grad_clip_norm': 1.0,
+        'amp_enabled': args.amp_enabled,
+        'amp_dtype': args.amp_dtype,
     }
 
     # Start parent MLflow run

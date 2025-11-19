@@ -79,27 +79,32 @@ train: train-full  ## Run the default full training pipeline
 
 train-smoke:  ## Run a quick 2-fold training smoke test
 	@echo "Running smoke-test training (2 folds, 1 epoch)..."
-	$(TRAIN_ENGINE) \
+	CUBLAS_WORKSPACE_CONFIG=:4096:8 $(TRAIN_ENGINE) \
 		--data-dir $(TRAIN_DATA_DIR) \
 		--dsm5-dir $(TRAIN_DSM5_DIR) \
 		--output-dir $(TRAIN_OUTPUT_DIR)/smoke_test \
 		--n-folds 2 \
 		--num-epochs 1 \
-		--batch-size 1 \
+		--batch-size 4 \
+		--grad-accum 2 \
+		--amp-dtype bfloat16 \
 		--learning-rate 1e-4 \
 		--experiment-name mentallama-smoke \
 		--tracking-uri $(MLFLOW_TRACKING_URI)
 	@echo "✓ Smoke-test training complete!"
 
-train-full:  ## Run full 5-fold cross-validation training
-	@echo "Running full 5-fold training..."
+train-full:  ## Run full 5-fold cross-validation training (optimized for RTX 3090)
+	@echo "Running full 5-fold training with BF16 AMP..."
+	@echo "Hardware config: batch_size=8, grad_accum=4 (effective batch=32), BF16"
 	CUBLAS_WORKSPACE_CONFIG=:4096:8 $(TRAIN_ENGINE) \
 		--data-dir $(TRAIN_DATA_DIR) \
 		--dsm5-dir $(TRAIN_DSM5_DIR) \
 		--output-dir $(TRAIN_OUTPUT_DIR)/runs \
 		--n-folds 5 \
 		--num-epochs 10 \
-		--batch-size 4 \
+		--batch-size 8 \
+		--grad-accum 4 \
+		--amp-dtype bfloat16 \
 		--learning-rate 1e-4 \
 		--experiment-name mentallama-cv-prod \
 		--tracking-uri $(MLFLOW_TRACKING_URI)
